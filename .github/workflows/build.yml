@@ -32,6 +32,7 @@ jobs:
           --collect-all rasterio --collect-all pyproj --collect-all shapely
           --collect-all pyogrio --collect-all geopandas
           --collect-data matplotlib --hidden-import yaml
+          --hidden-import matplotlib.backends.backend_pdf --hidden-import matplotlib.backends.backend_agg
           MapComposer.py
 
       - name: Self-test the packaged app

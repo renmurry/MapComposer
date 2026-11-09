@@ -37,7 +37,7 @@ def plan(parent, templates, fixed_id=None):
     return out
 
 
-def run_batch(parent, templates, job_template, fixed_id=None, log=print, stop_flag=lambda: False):
+def run_batch(parent, templates, job_template, fixed_id=None, log=print, stop_flag=lambda: False, themes=None):
     """job_template: a Job with shared texts/options; title/subtitle None = use each template's defaults."""
     results = []
     for folder, s, t, reason in plan(parent, templates, fixed_id):
@@ -62,10 +62,12 @@ def run_batch(parent, templates, job_template, fixed_id=None, log=print, stop_fl
         job = replace(job_template, template=t, rasters=s["rasters"], vectors=s["vectors"], texts=texts,
                       out_base=os.path.join(folder, f"{safe_name(s['name'] + '_' + t['id'])}_{paper}"))
         try:
-            r = compose(job, log=lambda m: log("   " + m))
-            for w in r["warnings"]:
-                log("   note: " + w)
-            log("   saved: " + ", ".join(os.path.basename(o) for o in r["outputs"]))
+            for th in (themes or [job.theme]):
+                j = replace(job, theme=th, out_base=job.out_base + (f"_{th}" if themes and len(themes) > 1 else ""))
+                r = compose(j, log=lambda m: log("   " + m))
+                for w in r["warnings"]:
+                    log("   note: " + w)
+                log("   saved: " + ", ".join(os.path.basename(o) for o in r["outputs"]))
             results.append((folder, "ok", r))
         except Exception as e:
             log(f"   FAILED: {e}"); results.append((folder, "error", str(e)))

@@ -21,8 +21,9 @@ def user_dir():
 def ensure_user_copies():
     """Copy built-in styles/templates into the user folder once, so they can be edited there."""
     d = user_dir()
-    if not os.path.exists(os.path.join(d, "styles.yaml")):
-        shutil.copy(resource("styles.yaml"), os.path.join(d, "styles.yaml"))
+    for f in ("styles.yaml", "themes.yaml"):
+        if not os.path.exists(os.path.join(d, f)):
+            shutil.copy(resource(f), os.path.join(d, f))
     tdir = resource("templates")
     for f in os.listdir(tdir):
         dst = os.path.join(d, "templates", f)

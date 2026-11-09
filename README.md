@@ -17,6 +17,24 @@ Templates are YAML files. **Edit templates / styles…** opens your editable cop
 `styles.yaml` holds colours and the class names that are recognised automatically (road types, LULC classes,
 stream order fields).
 
+## Themes
+
+Every map can be drawn in five themes: **Classic** (navy title bar), **Atlas** (cream paper, serif),
+**Night** (dark, teal accents), **Minimal** (open white layout, one accent colour) and **Blueprint**
+(engineering title block, monospace). **Compare themes** renders the current map in all of them side by side;
+**Also export every theme** writes one file per theme. Fonts are bundled (SIL Open Font License, see
+`mapcomposer/resources/fonts`) so output looks the same on every PC. Themes live in `themes.yaml`; copy a
+block to make your own.
+
+## Styling
+
+- **Style by** a text field gives categories; a numeric field (marked #) gives **graduated colours**
+  (natural breaks, quantile or equal interval, 3-9 classes) for polygons, lines and points.
+- **Label** writes a field on the map: inside polygons, beside points, and **along lines** for road and
+  stream names (repeated on long lines, not crowded).
+- **Layer order**: move rows with ▲▼; tick *Draw layers in table order* (top row is drawn on top).
+- Several ortho tiles in one folder are joined into one seamless image.
+
 ## Context awareness
 
 - **Scan** reads the folder (and sub-folders): rasters are classed as RGB ortho, multiband satellite,
@@ -32,8 +50,12 @@ stream order fields).
 
 ## Inputs
 
-GeoTIFF / IMG / JP2 / VRT rasters (any CRS, reprojected on the fly; choose display bands for multiband
-imagery), Shapefile, GeoPackage (all layers), KML/KMZ, GeoJSON, CSV points (lat/long or E/N columns).
+- Rasters: GeoTIFF, ERDAS IMG, JPEG2000, VRT, ASCII grid (.asc), BIL/BIP/BSQ, SRTM .hgt, USGS .dem, ER Mapper,
+  NetCDF / HDF5 (each variable listed separately), SAGA, IDRISI, MBTiles, ESRI grid folders, and PNG/JPG with a
+  world file. Any CRS, reprojected on the fly; choose display bands for multiband imagery.
+- Vectors: Shapefile, File geodatabase (.gdb), GeoPackage, KML/KMZ, GeoJSON, DXF, GPX, MapInfo TAB/MIF, GML,
+  FlatGeobuf, SpatiaLite, CSV points (lat/long or E/N columns).
+- Not supported (proprietary, not in open GDAL builds): DWG, ECW, MrSID.
 A classified raster can carry a colour table, or a sidecar CSV with the same name (`value,name[,#colour]`).
 
 ## Using it

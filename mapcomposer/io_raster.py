@@ -10,14 +10,22 @@ from rasterio.vrt import WarpedVRT
 from rasterio.windows import from_bounds, Window, bounds as win_bounds
 from pyproj import CRS
 
-RASTER_EXT = (".tif", ".tiff", ".img", ".jp2", ".vrt")
+RASTER_EXT = (".tif", ".tiff", ".img", ".jp2", ".vrt", ".asc", ".bil", ".bip", ".bsq", ".hgt", ".dem", ".ers",
+              ".nc", ".h5", ".hdf5", ".rst", ".sdat", ".grd", ".mbtiles", ".png", ".jpg", ".jpeg")
+_WORLD = {".png": (".pgw", ".pngw", ".wld"), ".jpg": (".jgw", ".jpgw", ".wld"), ".jpeg": (".jgw", ".wld")}
 
 
 class RLayer:
     def __init__(self, path):
         self.path = path
-        self.name = os.path.splitext(os.path.basename(path))[0]
+        if path.upper().startswith(("NETCDF:", "HDF5:")):
+            parts = path.split(":")
+            self.name = os.path.splitext(os.path.basename(parts[1].strip('"')))[0] + ":" + parts[-1]
+        else:
+            self.name = os.path.splitext(os.path.basename(path.rstrip("/\\")))[0]
         with rasterio.open(path) as r:
+            if r.count == 0:
+                raise ValueError("no raster bands (try a single variable)")
             self.count, self.dtype = r.count, r.dtypes[0]
             self.width, self.height = r.width, r.height
             self.crs = CRS.from_wkt(r.crs.to_wkt()) if r.crs else None
@@ -32,6 +40,7 @@ class RLayer:
             self.has_alpha = "alpha" in self.colorinterp
             self.kind = self._detect(r)
         self.classes = self._load_classes() if self.kind == "classified" else None
+        self._cache = {}
 
     @property
     def res_m(self):
@@ -69,6 +78,8 @@ class RLayer:
         """value -> dict(name, color). From sidecar CSV (value,name[,color]) and/or embedded colour table."""
         classes = {}
         side = os.path.splitext(self.path)[0] + ".csv"
+        if not os.path.isfile(self.path):
+            side = os.path.join(self.path, os.path.basename(self.path.rstrip("/\\")) + ".csv")
         if os.path.exists(side):
             with open(side, newline="", encoding="utf-8-sig") as f:
                 for row in csv.reader(f):
@@ -94,7 +105,18 @@ class RLayer:
 
     def read(self, map_crs, ext, max_px, bands=None, resampling=None):
         """Read bands for ground extent ext=(minx,maxx,miny,maxy) in map CRS, clipped to raster.
-        Returns (array[b,h,w], valid_mask[h,w], (l,r,b,t)) or (None, None, None)."""
+        Returns (array[b,h,w], valid_mask[h,w], (l,r,b,t)) or (None, None, None). Recent reads are cached
+        so rendering several themes of the same map does not re-read the image."""
+        key = (str(map_crs), tuple(round(e, 3) for e in ext), int(max_px), tuple(bands or ()), str(resampling))
+        if key in self._cache:
+            return self._cache[key]
+        out = self._read(map_crs, ext, max_px, bands, resampling)
+        if len(self._cache) >= 4:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[key] = out
+        return out
+
+    def _read(self, map_crs, ext, max_px, bands=None, resampling=None):
         src, vrt = self._open(map_crs)
         ds = vrt or src
         try:
@@ -158,11 +180,36 @@ class RLayer:
             src.close()
 
 
+def _georeferenced_image(path):
+    """PNG/JPG only count as map data when they carry a world file or .aux.xml georeferencing."""
+    base, ext = os.path.splitext(path)
+    ext = ext.lower()
+    if ext not in _WORLD:
+        return True
+    if os.path.exists(path + ".aux.xml"):
+        return True
+    return any(os.path.exists(base + w) or os.path.exists(base + w.upper()) for w in _WORLD[ext])
+
+
+def expand(path):
+    """NetCDF/HDF files with several variables -> one entry per variable (GDAL subdataset name)."""
+    try:
+        with rasterio.open(path) as r:
+            if r.count == 0 and r.subdatasets:
+                return list(r.subdatasets)
+    except Exception:
+        pass
+    return [path]
+
+
 def find_rasters(folder):
     out = []
     for root, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        # ESRI grid: a folder holding hdr.adf
+        grids = [d for d in dirs if os.path.exists(os.path.join(root, d, "hdr.adf"))]
+        out += [os.path.join(root, d) for d in grids]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in grids and not d.lower().endswith(".gdb")]
         for f in sorted(files):
-            if f.lower().endswith(RASTER_EXT):
+            if f.lower().endswith(RASTER_EXT) and _georeferenced_image(os.path.join(root, f)):
                 out.append(os.path.join(root, f))
     return out

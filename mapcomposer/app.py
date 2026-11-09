@@ -21,6 +21,10 @@ from .compose import compose, Job, PAPERS
 from .place import PlaceIndex
 from .paths import ensure_user_copies, user_dir
 from .batch import run_batch, plan, safe_name
+from .styles import load_themes
+
+CLASSIFY = [("Auto", "auto"), ("Categories", "categories"), ("Natural breaks", "jenks"), ("Quantile", "quantile"),
+            ("Equal interval", "equal")]
 
 SCALES = ["Auto", "1:100", "1:200", "1:250", "1:500", "1:1000", "1:2000", "1:2500", "1:5000", "1:10000",
           "1:25000", "1:50000", "1:100000", "1:250000"]
@@ -52,6 +56,27 @@ class PreviewDialog(QDialog):
         lbl = QLabel(); lbl.setAlignment(Qt.AlignCenter)
         lbl.setPixmap(QPixmap(path).scaledToWidth(1260, Qt.SmoothTransformation))
         sa.setWidget(lbl); lay.addWidget(sa)
+
+
+class GalleryDialog(QDialog):
+    """Side-by-side previews of one map in every theme; pick one."""
+    def __init__(self, previews, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Compare themes - click 'Use this' under the one you want")
+        self.resize(1500, 950)
+        self.chosen = None
+        outer = QVBoxLayout(self); sa = QScrollArea(); sa.setWidgetResizable(True); outer.addWidget(sa)
+        host = QWidget(); grid = QGridLayout(host); sa.setWidget(host)
+        for k, (tid, name, path) in enumerate(previews):
+            cell = QVBoxLayout(); box = QWidget(); box.setLayout(cell)
+            lbl = QLabel(); lbl.setPixmap(QPixmap(path).scaledToWidth(700, Qt.SmoothTransformation))
+            cap = QLabel(f"<b>{name}</b>"); b = QPushButton(f"Use {name}")
+            b.clicked.connect(lambda _=False, t=tid: self._pick(t))
+            cell.addWidget(lbl); row = QHBoxLayout(); row.addWidget(cap); row.addStretch(1); row.addWidget(b); cell.addLayout(row)
+            grid.addWidget(box, k // 2, k % 2)
+
+    def _pick(self, tid):
+        self.chosen = tid; self.accept()
 
 
 def _combo(items, current=""):
@@ -89,13 +114,14 @@ class MainWindow(QMainWindow):
 
         btns = QHBoxLayout()
         self.btn_preview = QPushButton("Preview"); self.btn_preview.clicked.connect(self.preview)
+        self.btn_compare = QPushButton("Compare themes"); self.btn_compare.clicked.connect(self.compare_themes)
         self.btn_go = QPushButton("Generate map"); self.btn_go.clicked.connect(self.generate)
         self.btn_go.setStyleSheet("font-weight:bold; padding:6px 18px;")
         self.btn_stop = QPushButton("Stop batch"); self.btn_stop.clicked.connect(self._stop); self.btn_stop.setEnabled(False)
         self.btn_open = QPushButton("Open output folder"); self.btn_open.clicked.connect(self.open_output)
         self.btn_tpl = QPushButton("Edit templates / styles..."); self.btn_tpl.clicked.connect(self.open_templates)
         self.progress = QProgressBar(); self.progress.setRange(0, 0); self.progress.setVisible(False); self.progress.setMaximumWidth(180)
-        for b in (self.btn_preview, self.btn_go, self.btn_stop, self.btn_open, self.btn_tpl):
+        for b in (self.btn_preview, self.btn_compare, self.btn_go, self.btn_stop, self.btn_open, self.btn_tpl):
             btns.addWidget(b)
         btns.addWidget(self.progress); btns.addStretch(1)
         root.addLayout(btns)
@@ -130,11 +156,20 @@ class MainWindow(QMainWindow):
         self.rtable.setHorizontalHeaderLabels(["Raster", "Detected", "Cell size", "Role", "Bands"])
         self._table_setup(self.rtable); self.rtable.setMaximumHeight(150)
         lay.addWidget(self.rtable)
-        lay.addWidget(QLabel("Vector layers - check each Role. 'Style by' colours features by a field; 'Label' writes a field on the map."))
-        self.vtable = QTableWidget(0, 6)
-        self.vtable.setHorizontalHeaderLabels(["Layer", "Geometry", "Features", "Role", "Style by", "Label"])
+        lay.addWidget(QLabel("Vector layers - check each Role. 'Style by' colours by a field (numbers (#) give graduated "
+                             "colours); 'Label' writes a field on the map, along lines for roads/streams."))
+        vrow = QHBoxLayout()
+        self.vtable = QTableWidget(0, 8)
+        self.vtable.setHorizontalHeaderLabels(["Layer", "Geometry", "Features", "Role", "Style by", "Classes", "N", "Label"])
         self._table_setup(self.vtable)
-        lay.addWidget(self.vtable, 1)
+        vrow.addWidget(self.vtable, 1)
+        vb = QVBoxLayout()
+        bu = QPushButton("▲"); bu.setMaximumWidth(34); bu.setToolTip("Move layer up (drawn on top)"); bu.clicked.connect(lambda: self._move(-1))
+        bd = QPushButton("▼"); bd.setMaximumWidth(34); bd.setToolTip("Move layer down"); bd.clicked.connect(lambda: self._move(1))
+        vb.addWidget(bu); vb.addWidget(bd); vb.addStretch(1); vrow.addLayout(vb)
+        lay.addLayout(vrow, 1)
+        self.order_check = QCheckBox("Draw layers in table order (top row on top) - otherwise by role")
+        lay.addWidget(self.order_check)
         r2 = QHBoxLayout()
         self.out_edit = QLineEdit(); self.out_edit.setPlaceholderText("Same as data folder")
         bo = QPushButton("..."); bo.setMaximumWidth(32); bo.clicked.connect(self._pick_out)
@@ -146,7 +181,8 @@ class MainWindow(QMainWindow):
         t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         for c in range(1, t.columnCount()):
             t.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
-        t.verticalHeader().setVisible(False); t.setSelectionMode(QAbstractItemView.NoSelection)
+        t.verticalHeader().setVisible(False)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows); t.setSelectionMode(QAbstractItemView.SingleSelection)
 
     def _batch_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
@@ -201,6 +237,11 @@ class MainWindow(QMainWindow):
         self.pdf_check = QCheckBox("PDF"); self.png_check = QCheckBox("PNG")
         self.dpi_spin = QSpinBox(); self.dpi_spin.setRange(100, 600); self.dpi_spin.setSingleStep(50); self.dpi_spin.setSuffix(" dpi")
         orow = QHBoxLayout(); orow.addWidget(self.pdf_check); orow.addWidget(self.png_check); orow.addWidget(self.dpi_spin); orow.addStretch(1)
+        self.theme_combo = QComboBox()
+        for tid, t in load_themes().items():
+            self.theme_combo.addItem(t.get("name", tid), tid)
+        self.all_themes = QCheckBox("Also export every theme (one file each)")
+        f2.addRow("Theme:", self.theme_combo); f2.addRow(self.all_themes)
         f2.addRow("Paper:", self.paper_combo); f2.addRow("Orientation:", self.orient_combo); f2.addRow("Scale:", self.scale_combo)
         f2.addRow(self.sides_check); f2.addRow(self.str_check, self.str_tol); f2.addRow(self.cont_check, self.cont_iv)
         f2.addRow("Save as:", orow)
@@ -232,6 +273,8 @@ class MainWindow(QMainWindow):
         self.dpi_spin.setValue(int(s.value("dpi", 300)))
         self.folder_edit.setText(s.value("last_folder", "")); self.parent_edit.setText(s.value("last_parent", ""))
         self.ref_edit.setText(s.value("ref_folder", ""))
+        i = self.theme_combo.findData(s.value("theme", "classic")); self.theme_combo.setCurrentIndex(max(0, i))
+        self.all_themes.setChecked(b("all_themes", False))
         if self.ref_edit.text():
             self._load_ref(self.ref_edit.text())
 
@@ -244,7 +287,8 @@ class MainWindow(QMainWindow):
                      ("str_tol", self.str_tol.value()), ("pdf", self.pdf_check.isChecked()),
                      ("png", self.png_check.isChecked()), ("dpi", self.dpi_spin.value()),
                      ("last_folder", self.folder_edit.text()), ("last_parent", self.parent_edit.text()),
-                     ("ref_folder", self.ref_edit.text())):
+                     ("ref_folder", self.ref_edit.text()), ("theme", self.theme_combo.currentData()),
+                     ("all_themes", self.all_themes.isChecked())):
             s.setValue(k, v)
 
     def closeEvent(self, ev):
@@ -257,11 +301,12 @@ class MainWindow(QMainWindow):
 
     def _update_buttons(self, *_):
         single = self.tabs.currentIndex() == 0
-        self.btn_preview.setEnabled(single); self.btn_go.setText("Generate map" if single else "Run batch")
+        self.btn_preview.setEnabled(single); self.btn_compare.setEnabled(single)
+        self.btn_go.setText("Generate map" if single else "Run batch")
 
     def _busy(self, on):
         self.progress.setVisible(on)
-        for b in (self.btn_preview, self.btn_go):
+        for b in (self.btn_preview, self.btn_compare, self.btn_go):
             b.setEnabled(not on)
         self.btn_stop.setEnabled(on and self.tabs.currentIndex() == 1)
         if not on:
@@ -345,7 +390,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Templates and styles",
                                 f"Your editable copies are in:\n{d}\n\n- templates\\*.yaml : one file per map type. Copy one, "
                                 "change 'id' and 'name', and it appears in the list after restarting.\n- styles.yaml : colours "
-                                "and recognised class names.\n\nDelete a file to get the built-in version back.")
+                                "and recognised class names.\n- themes.yaml : the visual themes (fonts, colours, title style).\n\nDelete a file to get the built-in version back.")
         QDesktopServices.openUrl(QUrl.fromLocalFile(d))
 
     # ------------------------------------------------------------------ scanning
@@ -373,15 +418,8 @@ class MainWindow(QMainWindow):
             self.rtable.setCellWidget(i, 3, _combo(RROLES, r["role"]))
             be = QLineEdit(",".join(map(str, r["bands"]))); be.setMaximumWidth(70)
             be.setEnabled(rl.count >= 3); self.rtable.setCellWidget(i, 4, be)
-        self.vtable.setRowCount(0)
-        for v in sc["vectors"]:
-            i = self.vtable.rowCount(); self.vtable.insertRow(i); lyr = v["layer"]
-            for c, val in enumerate([rel(lyr.path) + (f" [{lyr.sublayer}]" if lyr.sublayer else ""), lyr.kind, str(len(lyr))]):
-                it = QTableWidgetItem(val); it.setFlags(it.flags() & ~Qt.ItemIsEditable); self.vtable.setItem(i, c, it)
-            self.vtable.setCellWidget(i, 3, _combo(VROLES, v["role"]))
-            self.vtable.setCellWidget(i, 4, _combo([""] + lyr.string_fields(), v["style_field"]))
-            self.vtable.setCellWidget(i, 5, _combo([""] + lyr.label_fields(), v["label_field"]))
-            self.vtable.cellWidget(i, 3).currentTextChanged.connect(self._roles_changed)
+        self._rel = rel
+        self._fill_vtable()
         for c in range(self.rtable.rowCount()):
             self.rtable.cellWidget(c, 3).currentTextChanged.connect(self._roles_changed)
         self.name_edit.setText(sc["name"])
@@ -389,6 +427,48 @@ class MainWindow(QMainWindow):
         self.log(f"Scanned: {len(sc['rasters'])} raster(s), {len(sc['vectors'])} vector layer(s)")
         for w in sc["warnings"]:
             self.log("  note: " + w)
+
+    def _fill_vtable(self):
+        rel = self._rel
+        self.vtable.setRowCount(0)
+        for v in self.sc["vectors"]:
+            i = self.vtable.rowCount(); self.vtable.insertRow(i); lyr = v["layer"]
+            for c, val in enumerate([rel(lyr.path) + (f" [{lyr.sublayer}]" if lyr.sublayer else ""), lyr.kind, str(len(lyr))]):
+                it = QTableWidgetItem(val); it.setFlags(it.flags() & ~Qt.ItemIsEditable); self.vtable.setItem(i, c, it)
+            self.vtable.setCellWidget(i, 3, _combo(VROLES, v["role"]))
+            sf = QComboBox(); sf.addItem("", "")
+            for f in lyr.string_fields():
+                sf.addItem(f, f)
+            for f in lyr.numeric_fields():
+                if f not in lyr.string_fields():
+                    sf.addItem(f + " (#)", f)
+            j = sf.findData(v["style_field"]); sf.setCurrentIndex(max(0, j))
+            self.vtable.setCellWidget(i, 4, sf)
+            cc = QComboBox()
+            for t, k in CLASSIFY:
+                cc.addItem(t, k)
+            cc.setCurrentIndex(max(0, cc.findData(v.get("classify", "auto"))))
+            self.vtable.setCellWidget(i, 5, cc)
+            n = QSpinBox(); n.setRange(3, 9); n.setValue(int(v.get("classes", 5))); self.vtable.setCellWidget(i, 6, n)
+            self.vtable.setCellWidget(i, 7, _combo([""] + lyr.label_fields() + [f for f in lyr.fields if f not in lyr.label_fields()],
+                                                   v["label_field"]))
+            self.vtable.cellWidget(i, 3).currentTextChanged.connect(self._roles_changed)
+
+    def _move(self, d):
+        if not self.sc:
+            return
+        r = self.vtable.currentRow()
+        if r < 0 or not (0 <= r + d < len(self.sc["vectors"])):
+            return
+        try:
+            self._apply_tables()
+        except ValueError:
+            pass
+        v = self.sc["vectors"]
+        v[r], v[r + d] = v[r + d], v[r]
+        self._fill_vtable()
+        self.vtable.selectRow(r + d)
+        self.order_check.setChecked(True)
 
     def _apply_tables(self):
         for i, r in enumerate(self.sc["rasters"]):
@@ -404,8 +484,11 @@ class MainWindow(QMainWindow):
                     raise ValueError(f"{r['layer'].name}: choose 3 bands between 1 and {r['layer'].count}")
         for i, v in enumerate(self.sc["vectors"]):
             v["role"] = self.vtable.cellWidget(i, 3).currentText()
-            v["style_field"] = self.vtable.cellWidget(i, 4).currentText()
-            v["label_field"] = self.vtable.cellWidget(i, 5).currentText()
+            v["style_field"] = self.vtable.cellWidget(i, 4).currentData() or ""
+            v["classify"] = self.vtable.cellWidget(i, 5).currentData()
+            v["classes"] = self.vtable.cellWidget(i, 6).value()
+            v["label_field"] = self.vtable.cellWidget(i, 7).currentText()
+            v["order"] = i
 
     def _roles_changed(self, *_):
         if not self.sc:
@@ -453,6 +536,8 @@ class MainWindow(QMainWindow):
                      rmse=self.rmse_edit.text().strip(), prepared_by=self.prep_edit.text().strip(),
                      disclaimer=self.disc_edit.text().strip() if self.disc_check.isChecked() else "")
         return Job(template=self._template(), rasters=[], vectors=[], out_base="", texts=texts,
+                   theme=self.theme_combo.currentData() or "classic",
+                   layer_order="table" if self.order_check.isChecked() else "role",
                    paper=self.paper_combo.currentText(), orientation=orient, scale=scale,
                    side_lengths=self.sides_check.isChecked(), straighten=self.str_check.isChecked(),
                    straighten_tol=self.str_tol.value(), contours=self.cont_check.isChecked(),
@@ -490,6 +575,29 @@ class MainWindow(QMainWindow):
         self._start(lambda log, stop: compose(job, preview=True, log=log),
                     lambda r: (self._report(r), PreviewDialog(r["outputs"][0], self).exec()))
 
+    def compare_themes(self):
+        try:
+            job = self._single_job()
+        except Exception as e:
+            QMessageBox.warning(self, "MapComposer", str(e)); return
+        themes = load_themes()
+        self.log(f"Rendering {len(themes)} theme previews...")
+
+        def work(log, stop):
+            out = []
+            for tid, t in themes.items():
+                j = replace(job, theme=tid, out_base=os.path.join(tempfile.gettempdir(), f"mapcomposer_{tid}"))
+                r = compose(j, preview=True, log=lambda m: None)
+                out.append((tid, t.get("name", tid), r["outputs"][0]))
+            return out
+
+        def done(previews):
+            dlg = GalleryDialog(previews, self)
+            if dlg.exec() and dlg.chosen:
+                self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(dlg.chosen)))
+                self.log(f"Theme set to {self.theme_combo.currentText()}")
+        self._start(work, done)
+
     def generate(self):
         if self.tabs.currentIndex() == 1:
             return self.batch()
@@ -497,8 +605,16 @@ class MainWindow(QMainWindow):
             job = self._single_job()
         except Exception as e:
             QMessageBox.warning(self, "MapComposer", str(e)); return
-        self.log(f"Generating {job.template['name']} ...")
-        self._start(lambda log, stop: compose(job, log=log), self._report)
+        themes = list(load_themes().keys()) if self.all_themes.isChecked() else [job.theme]
+        self.log(f"Generating {job.template['name']} in {len(themes)} theme(s) ...")
+
+        def work(log, stop):
+            reps = []
+            for t in themes:
+                j = replace(job, theme=t, out_base=job.out_base + (f"_{t}" if len(themes) > 1 else ""))
+                reps.append(compose(j, log=log))
+            return reps
+        self._start(work, lambda reps: [self._report(r) for r in reps])
 
     def batch(self):
         parent = self.parent_edit.text().strip().strip('"')
@@ -517,7 +633,8 @@ class MainWindow(QMainWindow):
         def done(res):
             ok = sum(1 for r in res if r[1] == "ok")
             self.log(f"Batch finished: {ok} map(s) made, {len(res) - ok} skipped or failed")
-        self._start(lambda log, stop: run_batch(parent, self.templates, base, fixed, log=log, stop_flag=stop), done)
+        themes = list(load_themes().keys()) if self.all_themes.isChecked() else None
+        self._start(lambda log, stop: run_batch(parent, self.templates, base, fixed, log=log, stop_flag=stop, themes=themes), done)
 
     def _stop(self):
         if self.worker:

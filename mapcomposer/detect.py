@@ -4,7 +4,7 @@ import re
 import warnings
 
 from .io_vector import read_any, find_vectors
-from .io_raster import RLayer, find_rasters
+from .io_raster import RLayer, find_rasters, expand, RASTER_EXT
 from .styles import load_styles, is_lulc_values
 
 VROLES = ["Boundary", "Admin", "Thematic", "Road", "Drainage", "Building", "Points", "Contour", "Other", "Ignore"]
@@ -73,7 +73,9 @@ def guess_vector(layer):
     elif role == "Road":
         style_field = next((f for f in [_first_field(layer, [c]) for c in cf["road"]] if f and f in sfields), "")
         if not style_field:
-            style_field = next((f for f in sfields if not any(ch.isdigit() for v in layer.text_values(f) for ch in v)), "")
+            style_field = next((f for f in sfields if f.lower() not in ("name", "road_name", "rd_name", "label")
+                                and len(set(layer.text_values(f))) < max(2, len(layer))
+                                and not any(ch.isdigit() for v in layer.text_values(f) for ch in v)), "")
     elif role == "Drainage":
         style_field = _first_field(layer, cf["drainage"])
     elif role in ("Building", "Other", "Points") and sfields:
@@ -81,6 +83,15 @@ def guess_vector(layer):
         style_field = small[0] if small else ""
 
     label_field = ""
+    if role in ("Road", "Drainage"):
+        names = ["name", "road_name", "rd_name", "roadname", "street", "river_name", "rivername", "stream_nam",
+                 "river", "nala_name", "label"]
+        for n in names:
+            f = _first_field(layer, [n])
+            if f and f != style_field:
+                vals = layer.text_values(f)
+                if len(vals) >= 0.5 * len(layer) and not all(v.replace(".", "").isdigit() for v in vals):
+                    label_field = f; break
     if role in ("Admin", "Points") or (role == "Boundary" and len(layer) > 1):
         cand = [_first_field(layer, [c]) for c in cf["admin"]] + layer.label_fields()
         for f in cand:
@@ -97,7 +108,11 @@ def scan(folder, extra_files=()):
     rpaths = find_rasters(folder) if folder else []
     vpaths = find_vectors(folder) if folder else []
     for f in extra_files:
-        (rpaths if f.lower().endswith((".tif", ".tiff", ".img", ".jp2", ".vrt")) else vpaths).append(f)
+        if os.path.isdir(f):
+            (vpaths if f.lower().endswith(".gdb") else rpaths).append(f)
+        else:
+            (rpaths if f.lower().endswith(RASTER_EXT) else vpaths).append(f)
+    rpaths = [x for p in rpaths for x in expand(p)]
 
     rasters = []
     for p in rpaths:
@@ -106,13 +121,19 @@ def scan(folder, extra_files=()):
         except Exception as e:
             warns.append(f"Could not read raster {os.path.basename(p)}: {e}"); continue
         rasters.append(dict(layer=rl, role=KIND_TO_RROLE[rl.kind], bands=_default_bands(rl)))
-    # keep one of each display role active by default (highest resolution basemap, DSM over DEM)
+    # keep one of each display role active by default (highest resolution, DSM over DEM). Basemap tiles that
+    # do not overlap the best image (e.g. an ortho split into tiles) stay active so they are drawn together.
     for role in ("Basemap", "Elevation", "Classified", "Continuous"):
         same = [r for r in rasters if r["role"] == role]
         if len(same) > 1:
             same.sort(key=lambda r: (r["layer"].res_m, -r["layer"].width * r["layer"].height))
+            best = same[0]["layer"]
             for r in same[1:]:
-                r["role"] = "Ignore"
+                rl = r["layer"]
+                tile = (role == "Basemap" and rl.crs == best.crs and abs(rl.res_m - best.res_m) < 0.5 * best.res_m
+                        and _overlap(rl.bounds, best.bounds) < 0.25)
+                if not tile:
+                    r["role"] = "Ignore"
 
     vectors = []
     with warnings.catch_warnings():
@@ -136,6 +157,13 @@ def scan(folder, extra_files=()):
     if not rasters and not vectors:
         warns.append("No rasters or vector files found")
     return dict(folder=folder, rasters=rasters, vectors=vectors, warnings=warns, name=default_name(folder))
+
+
+def _overlap(a, b):
+    """Overlap area as a share of the smaller box."""
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    sa = (a[2] - a[0]) * (a[3] - a[1]); sb = (b[2] - b[0]) * (b[3] - b[1])
+    return ix * iy / max(min(sa, sb), 1e-9)
 
 
 def _default_bands(rl):

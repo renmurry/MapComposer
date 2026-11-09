@@ -1,4 +1,4 @@
-"""Map composer: draws one map sheet from a template, rasters and vectors."""
+"""Map composer: draws one map sheet from a template, a theme, rasters and vectors."""
 import math
 import re
 import textwrap
@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -21,22 +22,22 @@ from shapely.geometry import Point, box
 from shapely.ops import unary_union
 
 from .geom import SQFT, straighten, explode_polys, ring_edges
-from .styles import load_styles, class_colors, is_lulc_values, pretty, match_rule
+from .styles import load_styles, class_colors, is_lulc_values, pretty, match_rule, load_themes, load_fonts
 from .place import place_line, fill_text
+from . import classify as cl
 
 PAPERS = {"A3": (420.0, 297.0), "A4": (297.0, 210.0), "A2": (594.0, 420.0), "A1": (841.0, 594.0)}
 NICE_SCALES = [50, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000,
                7500, 10000, 12500, 15000, 20000, 25000, 30000, 40000, 50000, 75000, 100000, 150000, 200000,
                250000, 300000, 500000, 750000, 1000000, 2000000]
-DARK, NAVY = "#1a1a1a", "#1f3b57"
-SOFT = ["#fbb4ae", "#b3cde3", "#ccebc5", "#decbe4", "#fed9a6", "#ffffcc", "#e5d8bd", "#fddaec", "#b3e2cd",
-        "#fdcdac", "#cbd5e8", "#f4cae4", "#e6f5c9", "#fff2ae", "#f1e2cc"]
+DARK = "#1a1a1a"
 POSITIONING = {
     "gnss": "Positioning: drone GNSS only (no GCP / RTK). Absolute coordinates may be offset by a few metres",
     "rtk": "Positioning: RTK/PPK-corrected drone positions",
     "gcp": "Positioning: ground control points",
     "none": "",
 }
+LINE_LABEL_ROLES = ("Road", "Drainage", "Other", "Contour")
 
 
 @dataclass
@@ -45,7 +46,8 @@ class Job:
     rasters: list
     vectors: list
     out_base: str
-    texts: dict = field(default_factory=dict)       # name,title,subtitle,date,source,positioning,rmse,prepared_by,disclaimer
+    texts: dict = field(default_factory=dict)
+    theme: str = "classic"
     paper: str = ""
     orientation: str = ""
     scale: int = 0
@@ -54,6 +56,7 @@ class Job:
     straighten_tol: float = 0.15
     contours: bool = None
     contour_interval: float = 0
+    layer_order: str = "role"          # role | table (vector list order: first = on top)
     png_dpi: int = 300
     write_pdf: bool = True
     write_png: bool = True
@@ -61,6 +64,7 @@ class Job:
     map_date: str = field(default_factory=lambda: date.today().strftime("%d %b %Y"))
 
 
+# ------------------------------------------------------------------ helpers
 def _nat(x):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(x))]
 
@@ -129,17 +133,22 @@ def _nan_blur(a, k):
     return out
 
 
+def _ramp(th, k):
+    cm = LinearSegmentedColormap.from_list("ramp", th["ramp"])
+    return [matplotlib.colors.to_hex(cm(i / max(k - 1, 1))) for i in range(k)]
+
+
 class Page:
     """Layout units are A3-equivalent millimetres; S scales them to the real paper."""
 
-    def __init__(self, paper, orientation):
+    def __init__(self, paper, orientation, th):
         w, h = PAPERS[paper]
         if orientation == "portrait":
             w, h = h, w
-        self.paper, self.orient = paper, orientation
+        self.paper, self.orient, self.th = paper, orientation, th
         self.S = max(w, h) / 420.0
         self.W, self.H = w / self.S, h / self.S
-        self.fig = plt.figure(figsize=(w / 25.4, h / 25.4))
+        self.fig = plt.figure(figsize=(w / 25.4, h / 25.4), facecolor=th["page_bg"])
 
     def x(self, v): return v / self.W
     def y(self, v): return v / self.H
@@ -149,7 +158,11 @@ class Page:
         kw.setdefault("fill", False)
         self.fig.add_artist(Rectangle((self.x(x0), self.y(y0)), self.x(w), self.y(h), transform=self.fig.transFigure, **kw))
 
+    def line(self, x0, y0, x1, y1, **kw):
+        self.fig.add_artist(Line2D([self.x(x0), self.x(x1)], [self.y(y0), self.y(y1)], transform=self.fig.transFigure, **kw))
+
     def text(self, x, y, s, size, **kw):
+        kw.setdefault("color", self.th["text"])
         return self.fig.text(self.x(x), self.y(y), s, fontsize=self.fs(size), **kw)
 
     def axes(self, x0, y0, w, h):
@@ -158,9 +171,19 @@ class Page:
 
 # =====================================================================================
 def compose(job: Job, preview=False, log=print):
+    load_fonts()
+    themes = load_themes()
+    th = themes.get(job.theme) or themes["classic"]
+    with plt.rc_context({"font.family": [th.get("font", "DejaVu Sans"), "DejaVu Sans"],
+                         "axes.edgecolor": th["map_edge"], "xtick.color": th["muted"], "ytick.color": th["muted"],
+                         "xtick.labelcolor": th["muted"], "ytick.labelcolor": th["muted"]}):
+        return _compose(job, th, preview, log)
+
+
+def _compose(job, th, preview, log):
     T = job.template
     st = load_styles()
-    rep = dict(plots=[], warnings=[], outputs=[], skipped_edges=[], scale=None, crs=None, places={})
+    rep = dict(plots=[], warnings=[], outputs=[], skipped_edges=[], scale=None, crs=None, places={}, theme=th["id"])
     warn = rep["warnings"]
     rasters = [r for r in job.rasters if r["role"] != "Ignore"]
     vectors = [v for v in job.vectors if v["role"] != "Ignore" and len(v["layer"])]
@@ -201,7 +224,7 @@ def compose(job: Job, preview=False, log=print):
     gdfs = {}
     for i, v in enumerate(vectors):
         if v["layer"].crs is None:
-            warn.append(f"{v['layer'].name}: no coordinate system, assumed {crs.name}")
+            warn.append(f"{v['layer'].name}: no coordinate system (e.g. DXF), assumed {crs.name}")
         gdfs[i] = v["layer"].to_map(crs)
 
     def raster_bounds(r):
@@ -263,10 +286,11 @@ def compose(job: Job, preview=False, log=print):
     # ---------------- page ----------------
     paper = job.paper or T["page"]["paper"]
     orient = job.orientation or T["page"]["orientation"]
-    pg = Page(paper, orient)
+    pg = Page(paper, orient, th)
     S = pg.S
-    pg.rect(5, 5, pg.W - 10, pg.H - 10, lw=1.6 * S, ec="#222")
-    pg.rect(6.5, 6.5, pg.W - 13, pg.H - 13, lw=0.5 * S, ec="#222")
+    pg.rect(5, 5, pg.W - 10, pg.H - 10, lw=(1.6 if th.get("frame_double") else 0.8) * S, ec=th["frame"])
+    if th.get("frame_double"):
+        pg.rect(6.5, 6.5, pg.W - 13, pg.H - 13, lw=0.5 * S, ec=th["frame"])
     if orient == "landscape":
         mx0, my0, mw, mh = 20, 17, pg.W - 141, pg.H - 31
         columns = [(pg.W - 114, 8, 104, pg.H - 22)]
@@ -293,21 +317,26 @@ def compose(job: Job, preview=False, log=print):
     ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3]); ax.set_aspect("equal")
     max_px = int(pmw / 25.4 * (110 if preview else max(job.png_dpi, 250)))
     legend, notes_extra = [], []
+    ctx_draw = dict(th=th, st=st, S=S, mpp=mpp, pg=pg, T=T, frame=frame)
 
     # ---------------- rasters ----------------
     imagery = None
-    basemap = next((r for r in rasters if r["role"] == "Basemap"), None) if T.get("basemap", True) else None
+    basemaps = [r for r in rasters if r["role"] == "Basemap"] if T.get("basemap", True) else []
     plain = True
-    if basemap:
-        rl = basemap["layer"]
-        arr, mask, iext = rl.read(crs, ext, max_px, bands=basemap["bands"])
-        if arr is not None:
-            rgb = _stretch(arr, mask)
-            img = np.dstack([rgb[0], rgb[1], rgb[2], np.where(mask, 255, 0).astype(np.uint8)])
-            ax.imshow(img, extent=iext, origin="upper", interpolation="lanczos", zorder=0)
-            plain = False
-            imagery = rl
-    ax.set_facecolor("#ebebeb" if not plain else "#f7f7f4")
+    if len(basemaps) == 1:
+        bm = basemaps[0]; rl = bm["layer"]
+        arr, mask, iext = rl.read(crs, ext, max_px, bands=bm["bands"])
+    elif basemaps:
+        arr, mask, iext = _mosaic(basemaps, crs, ext, max_px)
+    if basemaps and arr is not None:
+        rgb = _stretch(arr, mask)
+        img = np.dstack([rgb[0], rgb[1], rgb[2], np.where(mask, 255, 0).astype(np.uint8)])
+        ax.imshow(img, extent=iext, origin="upper", interpolation="lanczos", zorder=0)
+        plain = False
+        imagery = basemaps[0]["layer"]
+    basemap = next((b for b in basemaps if b["layer"] is imagery), None)
+    ax.set_facecolor(th["map_bg_plain"] if plain else th["map_bg_image"])
+    ctx_draw["plain"] = plain
 
     elev = next((r for r in rasters if r["role"] == "Elevation"), None)
     if elev and (plain or T["id"] == "terrain"):
@@ -322,42 +351,52 @@ def compose(job: Job, preview=False, log=print):
         if r["role"] == "Classified":
             _draw_classified(ax, r, crs, ext, max_px, st, legend, alpha=1.0 if plain else 0.8, clip=clip_geom)
             plain = False
+    ctx_draw["plain"] = plain if not basemaps else ctx_draw["plain"]
 
     do_cont = T["contours"]["default"] if job.contours is None else job.contours
     civ = job.contour_interval or T["contours"]["interval"]
     if do_cont and elev:
         try:
-            civ = _draw_contours(ax, elev, crs, ext, civ, legend, warn, S, preview, on_image=not (imagery is None and T["id"] == "terrain"), st=st)
-            notes_extra.append(("contours", f"Contours: {civ:g} m interval from {elev['layer'].name} "
-                                            "(DSM includes buildings and trees)" if elev["layer"].name.lower().find("dsm") >= 0
-                                 else f"Contours: {civ:g} m interval from {elev['layer'].name}"))
+            on_img = not (imagery is None and T["id"] == "terrain")
+            civ = _draw_contours(ax, elev, crs, ext, civ, legend, warn, S, preview, on_img, st, th)
+            dsm = "dsm" in elev["layer"].name.lower()
+            notes_extra.append(f"Contours: {civ:g} m interval from {elev['layer'].name}"
+                               + (" (DSM includes buildings and trees)" if dsm else ""))
         except Exception as e:
             warn.append(f"Contours skipped: {e}")
 
     # ---------------- vectors ----------------
-    order = {"Thematic": 1, "Admin": 2, "Contour": 3, "Drainage": 4, "Building": 5, "Other": 6, "Road": 7, "Points": 9}
-    for i in sorted([i for i, v in enumerate(vectors) if v["role"] != "Boundary"], key=lambda i: order.get(vectors[i]["role"], 8)):
-        g_i = gdfs[i]
+    idx = [i for i, v in enumerate(vectors) if v["role"] != "Boundary"]
+    if job.layer_order == "table":
+        idx.sort(key=lambda i: -vectors[i].get("order", i))      # first in table = drawn last (on top)
+    else:
+        order = {"Thematic": 1, "Admin": 2, "Contour": 3, "Drainage": 4, "Building": 5, "Other": 6, "Road": 7, "Points": 9}
+        idx.sort(key=lambda i: order.get(vectors[i]["role"], 8))
+    for z, i in enumerate(idx):
+        g_full = gdfs[i]
+        g_i = g_full
         if clip_geom is not None and vectors[i]["role"] == "Thematic":
             g_i = g_i.clip(clip_geom)
-        _draw_vector(ax, vectors[i], g_i, frame, legend, st, S, plain, T, mpp, pg)
+        _draw_vector(ax, vectors[i], g_i, g_full, legend, ctx_draw, zbase=3 + z * 0.5)
 
     # ---------------- boundaries ----------------
     bopt = T["boundary"]
     sides = bopt.get("side_lengths") if job.side_lengths is None else job.side_lengths
-    bst = st["roles"]["Boundary"]
-    lw = bst["width"] * S
+    bcol = th.get("boundary", "#ff2020")
+    lw = st["roles"]["Boundary"]["width"] * S
+    r_, g_, b_ = to_rgb(th["map_bg_plain"])
+    bhalo = "#000000" if (plain and (0.299 * r_ + 0.587 * g_ + 0.114 * b_) < 0.4) else "#ffffff"
     labelled = set()
     for p in plots:
         poly = p["poly"]
         for ring_i, ring in enumerate([poly.exterior] + list(poly.interiors)):
             xs, ys = ring.xy
             if ring_i == 0 and bopt.get("fill", False):
-                ax.add_patch(MPoly(np.c_[xs, ys], closed=True, fc=(*to_rgb(bst["fill"]), bst["fill_alpha"]), ec="none", zorder=20))
-            ax.plot(xs, ys, color=bst["edge"], lw=lw, zorder=21, ls="-" if ring_i == 0 else "--", path_effects=_halo(lw + 2.2 * S, bst["halo"]))
+                ax.add_patch(MPoly(np.c_[xs, ys], closed=True, fc=(*to_rgb(bcol), 0.12), ec="none", zorder=40))
+            ax.plot(xs, ys, color=bcol, lw=lw, zorder=41, ls="-" if ring_i == 0 else "--", path_effects=_halo(lw + 2.2 * S, bhalo))
         xs, ys = poly.exterior.xy
         if bopt.get("corners"):
-            ax.scatter(xs[:-1], ys[:-1], s=22 * S * S, c="white", edgecolors=bst["edge"], linewidths=1.3 * S, zorder=22)
+            ax.scatter(xs[:-1], ys[:-1], s=22 * S * S, c="white", edgecolors=bcol, linewidths=1.3 * S, zorder=42)
         if sides:
             for a, bb, Ln in ring_edges(poly.exterior.coords):
                 key = tuple(sorted([(round(a[0], 2), round(a[1], 2)), (round(bb[0], 2), round(bb[1], 2))]))
@@ -375,8 +414,8 @@ def compose(job: Job, preview=False, log=print):
                 ang = math.degrees(math.atan2(dy, dx))
                 ang = ang - 180 if ang > 90 else (ang + 180 if ang < -90 else ang)
                 ax.text(mxp + nx * off, myp + ny * off, f"{Ln:.2f} m", rotation=ang, rotation_mode="anchor",
-                        ha="center", va="center", fontsize=pg.fs(9.5), fontweight="bold", color="#111", zorder=30,
-                        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=bst["edge"], lw=0.8 * S, alpha=0.92))
+                        ha="center", va="center", fontsize=pg.fs(9.5), fontweight="bold", color="#111", zorder=50,
+                        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec=bcol, lw=0.8 * S, alpha=0.92))
         a = poly.area
         if bopt.get("area_label"):
             lp = poly.centroid if poly.contains(poly.centroid) else poly.representative_point()
@@ -384,7 +423,7 @@ def compose(job: Job, preview=False, log=print):
             unit = _area_unit(a)
             atxt = f"{a:,.2f} m²\n{a * SQFT:,.2f} sq ft" if unit == "m2" else _fmt_area(a, unit)
             ax.text(lp.x, lp.y, (f"{head}\n" if head else "") + atxt, ha="center", va="center",
-                    fontsize=pg.fs(12 if len(plots) == 1 else 9.5), fontweight="bold", color="white", zorder=31,
+                    fontsize=pg.fs(12 if len(plots) == 1 else 9.5), fontweight="bold", color="white", zorder=51,
                     linespacing=1.3, path_effects=_halo(3.2 * S, "#000"))
         rep["plots"].append(dict(label=p["label"] or "Plot", area=a, sqft=a * SQFT, perimeter=poly.length))
     if rep["skipped_edges"]:
@@ -393,14 +432,15 @@ def compose(job: Job, preview=False, log=print):
     # ---------------- grid ----------------
     ax.set_xlim(ext[0], ext[1]); ax.set_ylim(ext[2], ext[3]); ax.set_aspect("equal")
     ax.set_xlabel(""); ax.set_ylabel("")
+    gcol = th["grid_plain"] if plain else th["grid_image"]
     if T["grid"] == "latlon":
-        _graticule(ax, crs, ext, pg, plain)
+        _graticule(ax, crs, ext, pg, gcol)
     elif T["grid"] == "utm":
-        _utm_grid(ax, ext, gw, mpp, pg, plain)
+        _utm_grid(ax, ext, gw, mpp, pg, gcol)
     else:
         ax.set_xticks([]); ax.set_yticks([])
     for sp in ax.spines.values():
-        sp.set_linewidth(1.2 * S)
+        sp.set_linewidth(1.2 * S); sp.set_edgecolor(th["map_edge"])
 
     # ---------------- place context ----------------
     center_pt = (aoi.centroid if aoi is not None else Point(cx, cy))
@@ -436,6 +476,8 @@ def compose(job: Job, preview=False, log=print):
                 s = f"Imagery: {imagery.name}, {res:g} m resolution" + (f", acquired {dt}" if dt else "")
             if imagery.kind == "multiband":
                 s += f", bands {'-'.join(map(str, basemap['bands']))} as RGB"
+            if len(basemaps) > 1:
+                s += f" ({len(basemaps)} tiles)"
             notes.append(s)
         elif key == "elevation_source" and elev:
             dt = job.texts.get("date", "")
@@ -451,32 +493,33 @@ def compose(job: Job, preview=False, log=print):
         elif key == "measurements" and (plots or T["stats"] in ("admin_areas", "class_areas", "network_lengths")):
             notes.append("Areas and lengths are planimetric, computed in the map coordinate system")
         elif key == "contours":
-            notes += [t for k, t in notes_extra if k == "contours"]
+            notes += notes_extra
         elif key == "north_date":
             notes.append(f"North arrow shows grid north  |  Map date: {job.map_date}")
         elif key == "disclaimer" and job.texts.get("disclaimer"):
             notes.append(job.texts["disclaimer"])
     if "contours" not in T["notes"]:
-        notes += [t for k, t in notes_extra if k == "contours"]
+        notes += notes_extra
 
     # ---------------- panel ----------------
-    ctx = dict(pg=pg, S=S, title=title, subtitle=subtitle, denom=denom, paper=paper, legend=legend, plots=plots,
+    ctx = dict(pg=pg, S=S, th=th, title=title, subtitle=subtitle, denom=denom, paper=paper, legend=legend, plots=plots,
                T=T, rows=rows, stats_title=stats_title, notes=notes, prepared_by=job.texts.get("prepared_by", ""),
                mpp=mpp, ext=ext, gw=gw, gh=gh, crs=crs, rasters=rasters, basemap=basemap, imagery=imagery,
                place_index=job.place_index, center_pt=center_pt, aoi=aoi, preview=preview, places=places,
-               vectors=vectors, gdfs=gdfs)
+               vectors=vectors, gdfs=gdfs, date=job.map_date)
     _draw_panel(ctx, columns, panel)
 
     # ---------------- save ----------------
     meta = {"Title": title, "Author": job.texts.get("prepared_by") or None, "Creator": "MapComposer", "Producer": "MapComposer"}
+    fc = pg.fig.get_facecolor()
     if preview:
         out = job.out_base + "_preview.png"
-        pg.fig.savefig(out, dpi=90, metadata={"Software": "MapComposer"}); rep["outputs"].append(out)
+        pg.fig.savefig(out, dpi=90, metadata={"Software": "MapComposer"}, facecolor=fc); rep["outputs"].append(out)
     else:
         if job.write_pdf:
-            pg.fig.savefig(job.out_base + ".pdf", dpi=300, metadata=meta); rep["outputs"].append(job.out_base + ".pdf")
+            pg.fig.savefig(job.out_base + ".pdf", dpi=300, metadata=meta, facecolor=fc); rep["outputs"].append(job.out_base + ".pdf")
         if job.write_png:
-            pg.fig.savefig(job.out_base + ".png", dpi=job.png_dpi, metadata={"Software": "MapComposer"})
+            pg.fig.savefig(job.out_base + ".png", dpi=job.png_dpi, metadata={"Software": "MapComposer"}, facecolor=fc)
             rep["outputs"].append(job.out_base + ".png")
     plt.close(pg.fig)
     return rep
@@ -484,6 +527,42 @@ def compose(job: Job, preview=False, log=print):
 
 # =====================================================================================
 # raster drawing
+def _mosaic(basemaps, crs, ext, max_px):
+    """Warp several image tiles onto one grid so they join without seams."""
+    import rasterio
+    from rasterio.warp import reproject, Resampling
+    from rasterio.transform import from_bounds as tfb
+    gw, gh = ext[1] - ext[0], ext[3] - ext[2]
+    res = max(min(b["layer"].res_m for b in basemaps), max(gw, gh) / max_px)
+    ow, oh = max(1, int(gw / res)), max(1, int(gh / res))
+    dtr = tfb(ext[0], ext[2], ext[1], ext[3], ow, oh)
+    dtype = np.result_type(*[np.dtype(b["layer"].dtype) for b in basemaps])
+    out = np.zeros((3, oh, ow), dtype=dtype); valid = np.zeros((oh, ow), bool)
+    for b in basemaps:
+        rl = b["layer"]
+        with rasterio.open(rl.path) as src:
+            if rl.crs is not None:
+                tb = transform_bounds(rl.crs.to_wkt(), crs.to_wkt(), *rl.bounds)
+                if tb[2] < ext[0] or tb[0] > ext[1] or tb[3] < ext[2] or tb[1] > ext[3]:
+                    continue
+            m = np.zeros((oh, ow), np.uint8)
+            alpha = src.dataset_mask()
+            reproject(alpha, m, src_transform=src.transform, src_crs=src.crs, dst_transform=dtr, dst_crs=crs.to_wkt(),
+                      resampling=Resampling.nearest)
+            sel = (m > 0) & ~valid
+            if not sel.any():
+                continue
+            for k, band in enumerate(b["bands"][:3]):
+                tmp = np.zeros((oh, ow), dtype=dtype)
+                reproject(rasterio.band(src, band), tmp, dst_transform=dtr, dst_crs=crs.to_wkt(),
+                          resampling=Resampling.average if res > 1.5 * rl.res_m else Resampling.bilinear)
+                out[k][sel] = tmp[sel]
+            valid |= sel
+    if not valid.any():
+        return None, None, None
+    return out, valid, ext
+
+
 def _draw_elevation(ax, r, crs, ext, max_px, st, legend, T, S):
     rl = r["layer"]
     arr, mask, iext = rl.read(crs, ext, min(max_px, 2200))
@@ -562,7 +641,7 @@ def _draw_classified(ax, r, crs, ext, max_px, st, legend, alpha=1.0, clip=None):
     r["_table"] = table
 
 
-def _draw_contours(ax, r, crs, ext, iv, legend, warn, S, preview, on_image, st):
+def _draw_contours(ax, r, crs, ext, iv, legend, warn, S, preview, on_image, st, th):
     rl = r["layer"]
     target = max(rl.res_m, (ext[1] - ext[0]) / (250 if preview else 700))
     arr, mask, iext = rl.read(crs, ext, int((ext[1] - ext[0]) / target))
@@ -580,7 +659,7 @@ def _draw_contours(ax, r, crs, ext, iv, legend, warn, S, preview, on_image, st):
     levels = np.arange(math.floor(lo / iv) * iv, hi + iv, iv)
     xs = np.linspace(iext[0], iext[1], a.shape[1]); ys = np.linspace(iext[3], iext[2], a.shape[0])
     is_major = (np.round(levels / iv).astype(int) % 5) == 0
-    col = st["roles"]["Contour"]["color"] if on_image else st["roles"]["Contour"]["color_plain"]
+    col = st["roles"]["Contour"]["color"] if on_image else th.get("contour_plain", st["roles"]["Contour"]["color_plain"])
     if (~is_major).any():
         ax.contour(xs, ys, a, levels=levels[~is_major], colors=col, linewidths=0.5 * S, alpha=0.85, zorder=5)
     if is_major.any():
@@ -592,13 +671,71 @@ def _draw_contours(ax, r, crs, ext, iv, legend, warn, S, preview, on_image, st):
 
 # =====================================================================================
 # vector drawing
-def _draw_vector(ax, v, g, frame, legend, st, S, plain, T, mpp, pg):
+def _graduated(v, g_full):
+    sf = v["style_field"]
+    if not sf or sf not in g_full.columns or not pd.api.types.is_numeric_dtype(g_full[sf]):
+        return None
+    method = v.get("classify", "auto")
+    if method == "categories":
+        return None
+    if method == "auto":
+        if g_full[sf].nunique() <= 8:
+            return None
+        method = "jenks"
+    edges = cl.breaks(g_full[sf].tolist(), method, int(v.get("classes", 5)))
+    return edges if len(edges) >= 2 else None
+
+
+def _draw_vector(ax, v, g, g_full, legend, c, zbase):
+    th, st, S, mpp, pg, T, frame, plain = c["th"], c["st"], c["S"], c["mpp"], c["pg"], c["T"], c["frame"], c["plain"]
     role, lyr, sf = v["role"], v["layer"], v["style_field"]
     rs = st["roles"].get(role, st["roles"]["Other"])
     g = g[g.intersects(frame)]
     if not len(g):
         return
-    # class values & colours
+    halo_line = rs.get("halo", DARK)
+    edges = _graduated(v, g_full)
+
+    # ---- graduated (numeric) ----
+    if edges is not None:
+        k = len(edges) - 1
+        cols = _ramp(th, k)
+        cls_idx = cl.assign(g[sf].astype(float).values, edges)
+        grp = len(legend)
+        legend.append(dict(kind="header", label=f"{pretty(lyr.name)}: {pretty(sf)}"))
+        kinds = set(t.replace("Multi", "") for t in g.geom_type)
+        for ci, lab in enumerate(cl.labels(edges)):
+            sub = g[cls_idx == ci]
+            col = cols[ci]
+            if "Polygon" in kinds:
+                if len(sub):
+                    sub.plot(ax=ax, color=col, alpha=0.85 if plain else 0.7, edgecolor="none", zorder=zbase)
+                legend.append(dict(kind="patch", label=lab, fc=col, ec=th["muted"], alpha=1.0, lw=0.4 * S))
+            elif "LineString" in kinds:
+                w = (0.8 + 0.7 * ci) * S
+                if len(sub):
+                    sub.plot(ax=ax, color=col, linewidth=w, zorder=zbase + 0.1,
+                             path_effects=[pe.withStroke(linewidth=w + 1.4 * S, foreground=halo_line)])
+                legend.append(dict(kind="line", label=lab, color=col, lw=w, halo=halo_line))
+            else:
+                size = (4 + 2.2 * ci) * S
+                if len(sub):
+                    ax.scatter(sub.geometry.x, sub.geometry.y, s=size ** 2, c=col, edgecolors=DARK, linewidths=0.6 * S, zorder=zbase + 0.2)
+                legend.append(dict(kind="marker", label=lab, color=col, ec=DARK, ms=size))
+        if "Polygon" in kinds:
+            edge = th["admin_edge_plain"] if plain else "#ffffff"
+            g.boundary.plot(ax=ax, color=edge, linewidth=0.5 * S, alpha=0.8, zorder=zbase + 0.1)
+        nodata = (cls_idx < 0).sum()
+        if nodata:
+            g[cls_idx < 0].plot(ax=ax, color="#cccccc", alpha=0.6, zorder=zbase, hatch="//")
+            legend.append(dict(kind="patch", label="No data", fc="#cccccc", ec=th["muted"], alpha=1.0))
+        for e in legend[grp:]:
+            e["group"] = True
+        if v["label_field"]:
+            _labels_for(ax, v, g, c, zbase)
+        return
+
+    # ---- categorical / single symbol ----
     if sf and sf in g.columns:
         cls = g[sf].astype(str)
         uniq = sorted(cls.unique(), key=_nat)
@@ -615,24 +752,26 @@ def _draw_vector(ax, v, g, frame, legend, st, S, plain, T, mpp, pg):
 
     if role == "Drainage":
         dst = st["drainage_order"]
+        orders = None
         if sf and sf in g.columns:
             try:
                 orders = g[sf].astype(float)
             except ValueError:
                 orders = None
-        else:
-            orders = None
         if orders is not None:
             for o in sorted(orders.unique()):
                 sub = g[orders == o]
                 w = (dst["base_width"] + dst["per_order"] * o) * S
-                sub.plot(ax=ax, color=dst["color"], linewidth=w, zorder=10,
+                sub.plot(ax=ax, color=dst["color"], linewidth=w, zorder=zbase,
                          path_effects=[pe.withStroke(linewidth=w + 1.4 * S, foreground=rs["halo"])])
                 legend.append(dict(kind="line", label=f"Stream order {o:g}", color=dst["color"], lw=w, halo=rs["halo"]))
-            return
-        g.plot(ax=ax, color=rs["color"], linewidth=rs["width"] * S, zorder=10,
-               path_effects=[pe.withStroke(linewidth=rs["width"] * S + 1.6 * S, foreground=rs["halo"])])
-        legend.append(dict(kind="line", label="Drainage", color=rs["color"], lw=rs["width"] * S, halo=rs["halo"]))
+        else:
+            g.plot(ax=ax, color=rs["color"], linewidth=rs["width"] * S, zorder=zbase,
+                   path_effects=[pe.withStroke(linewidth=rs["width"] * S + 1.6 * S, foreground=rs["halo"])])
+            legend.append(dict(kind="line", label=pretty(lyr.name) if lyr.name.lower() not in ("drainage",) else "Drainage",
+                               color=rs["color"], lw=rs["width"] * S, halo=rs["halo"]))
+        if v["label_field"]:
+            _labels_for(ax, v, g, c, zbase)
         return
 
     for u in uniq:
@@ -640,81 +779,139 @@ def _draw_vector(ax, v, g, frame, legend, st, S, plain, T, mpp, pg):
         sty = cmap[u] if cmap else {}
         kinds = set(t.replace("Multi", "") for t in sub.geom_type)
         if role == "Admin":
-            edge = rs["edge_plain"] if plain else rs["edge"]
+            edge = th["admin_edge_plain"] if plain else rs["edge"]
             lwid = rs["width"] * S
             if plain:
-                cols = [SOFT[k % len(SOFT)] for k in range(len(sub))]
-                sub.plot(ax=ax, color=cols, alpha=rs["fill_alpha_plain"], edgecolor="none", zorder=3)
-            sub.boundary.plot(ax=ax, color=edge, linewidth=lwid, zorder=11,
+                pal = th["soft"]
+                cols = [pal[k % len(pal)] for k in range(len(sub))]
+                sub.plot(ax=ax, color=cols, alpha=0.9, edgecolor="none", zorder=zbase)
+            sub.boundary.plot(ax=ax, color=edge, linewidth=lwid, zorder=zbase + 0.2,
                               path_effects=None if plain else [pe.withStroke(linewidth=lwid + 1.8 * S, foreground=rs["halo"])])
             lab = pretty(u) if u else pretty(lyr.name)
-            legend.append(dict(kind="patch", label=lab, fc="#f0e6d2" if plain else "none", ec=edge, lw=lwid,
+            legend.append(dict(kind="patch", label=lab, fc=th["soft"][1] if plain else "none", ec=edge, lw=lwid,
                                halo=None if plain else rs["halo"]))
-            if T["labels"].get("Admin", True) and v["label_field"]:
-                _poly_labels(ax, sub, v["label_field"], mpp, pg, plain)
             continue
         col = sty.get("color") or rs.get("color") or rs.get("edge") or "#b6ff3b"
         width = (sty.get("width") or rs.get("width", 1.6)) * S
-        halo = rs.get("halo", DARK)
         name = pretty(u) if u else {"Road": "Road", "Building": "Building", "Points": pretty(lyr.name),
                                     "Contour": "Contour", "Other": pretty(lyr.name), "Thematic": pretty(lyr.name)}[role]
         if role == "Other" and u:
             name = f"{pretty(lyr.name)}: {pretty(u)}"
+        if role == "Building" and plain and col.lower() == "#ffffff":
+            col = th["text"]
         if "Polygon" in kinds:
             if role == "Thematic":
                 fa = rs["fill_alpha"] if plain else rs["fill_alpha_on_image"]
-                sub.plot(ax=ax, color=col, alpha=fa, edgecolor="none", zorder=3)
-                sub.boundary.plot(ax=ax, color=rs["edge"], linewidth=rs["width"] * S, alpha=0.6, zorder=4)
+                sub.plot(ax=ax, color=col, alpha=fa, edgecolor="none", zorder=zbase)
+                sub.boundary.plot(ax=ax, color=rs["edge"], linewidth=rs["width"] * S, alpha=0.6, zorder=zbase + 0.1)
                 legend.append(dict(kind="patch", label=name, fc=col, ec="#555", alpha=1.0))
             else:
                 fa = rs.get("fill_alpha", 0.12)
-                sub.plot(ax=ax, color=col, alpha=fa, edgecolor="none", zorder=9)
-                sub.boundary.plot(ax=ax, color=col, linewidth=width, zorder=10,
-                                  path_effects=[pe.withStroke(linewidth=width + 1.8 * S, foreground=halo)])
-                legend.append(dict(kind="patch", label=name, fc=col, ec=col, alpha=0.35, halo=halo, lw=1.5 * S))
+                sub.plot(ax=ax, color=col, alpha=fa, edgecolor="none", zorder=zbase)
+                sub.boundary.plot(ax=ax, color=col, linewidth=width, zorder=zbase + 0.1,
+                                  path_effects=[pe.withStroke(linewidth=width + 1.8 * S, foreground=halo_line)])
+                legend.append(dict(kind="patch", label=name, fc=col, ec=col, alpha=0.35, halo=halo_line, lw=1.5 * S))
         if "LineString" in kinds:
-            sub.plot(ax=ax, color=col, linewidth=width, zorder=10, linestyle="--" if sty.get("dash") else "-",
-                     path_effects=[pe.withStroke(linewidth=width + 2.2 * S, foreground=halo)])
-            legend.append(dict(kind="line", label=name, color=col, lw=width, halo=halo, dash=sty.get("dash")))
+            sub.plot(ax=ax, color=col, linewidth=width, zorder=zbase + 0.2, linestyle="--" if sty.get("dash") else "-",
+                     path_effects=[pe.withStroke(linewidth=width + 2.2 * S, foreground=halo_line)])
+            legend.append(dict(kind="line", label=name, color=col, lw=width, halo=halo_line, dash=sty.get("dash")))
         if "Point" in kinds:
-            pc = sty.get("color") or rs.get("color", "#ff2020")
+            pc = sty.get("color") or (th["accent"] if role == "Points" else rs.get("color", "#ff2020"))
             ax.scatter(sub.geometry.x, sub.geometry.y, s=(rs.get("size", 7) * S) ** 2, c=pc,
-                       edgecolors=rs.get("edge", "white"), linewidths=1 * S, zorder=25)
+                       edgecolors=rs.get("edge", "white"), linewidths=1 * S, zorder=zbase + 0.3)
             legend.append(dict(kind="marker", label=name, color=pc, ec=rs.get("edge", "white")))
-            if T["labels"].get("Points", True) and v["label_field"]:
-                for _, row in sub.iterrows():
-                    ax.annotate(str(row[v["label_field"]]), (row.geometry.x, row.geometry.y), xytext=(4 * S, 4 * S),
-                                textcoords="offset points", fontsize=pg.fs(7), color="white" if not plain else "#111",
-                                zorder=26, path_effects=_halo(2 * S, "#000" if not plain else "white"))
+    if v["label_field"]:
+        _labels_for(ax, v, g, c, zbase)
 
 
-def _poly_labels(ax, g, field_, mpp, pg, plain):
+def _labels_for(ax, v, g, c, zbase):
+    kinds = set(t.replace("Multi", "") for t in g.geom_type)
+    role, f = v["role"], v["label_field"]
+    if f not in g.columns:
+        return
+    if "Polygon" in kinds and c["T"]["labels"].get("Admin", True):
+        _poly_labels(ax, g, f, c, zbase)
+    elif "LineString" in kinds:
+        _line_labels(ax, g, f, c, italic=(role == "Drainage"), zbase=zbase)
+    elif "Point" in kinds and c["T"]["labels"].get("Points", True):
+        th, S, pg, plain = c["th"], c["S"], c["pg"], c["plain"]
+        for _, row in g.iterrows():
+            t = row[f]
+            if t is None or str(t) in ("", "nan", "None"):
+                continue
+            ax.annotate(str(t), (row.geometry.x, row.geometry.y), xytext=(4 * S, 4 * S), textcoords="offset points",
+                        fontsize=pg.fs(7), color=th["label_plain"] if plain else "white", zorder=60,
+                        path_effects=_halo(2 * S, th["label_halo_plain"] if plain else "#000"))
+
+
+def _poly_labels(ax, g, field_, c, zbase):
+    th, S, pg, plain, mpp = c["th"], c["S"], c["pg"], c["plain"], c["mpp"]
     for _, row in g.iterrows():
         geom = row.geometry
+        t = row[field_]
+        if t is None or str(t) in ("", "nan", "None"):
+            continue
         area_mm2 = geom.area / (mpp * mpp)
         if area_mm2 < 40:
             continue
         fs = min(10.0, max(5.0, math.sqrt(area_mm2) / 5.5))
         p = geom.representative_point()
-        ax.text(p.x, p.y, textwrap.fill(str(row[field_]), 16), ha="center", va="center", fontsize=pg.fs(fs),
-                color="#222" if plain else "white", fontweight="bold", zorder=24,
-                path_effects=_halo(2.4 * pg.S, "white" if plain else "#000"))
+        ax.text(p.x, p.y, textwrap.fill(str(t), 16), ha="center", va="center", fontsize=pg.fs(fs),
+                color=th["label_plain"] if plain else "white", fontweight="bold", zorder=60,
+                path_effects=_halo(2.4 * S, th["label_halo_plain"] if plain else "#000"))
+
+
+def _line_labels(ax, g, field_, c, italic=False, zbase=10):
+    """Names along lines: rotated to the local direction, repeated on long lines, not repeated close by."""
+    th, S, pg, plain, mpp = c["th"], c["S"], c["pg"], c["plain"], c["mpp"]
+    fs = 7.0
+    placed = {}
+    spacing_mm, min_gap_mm = 140.0, 70.0
+    col = ("#1565c0" if italic else th["label_plain"]) if plain else "white"
+    halo = th["label_halo_plain"] if plain else "#000"
+    for _, row in g.iterrows():
+        t = row[field_]
+        if t is None or str(t).strip() in ("", "nan", "None"):
+            continue
+        t = str(t).strip()
+        geom = row.geometry
+        parts = list(geom.geoms) if hasattr(geom, "geoms") else [geom]
+        for part in parts:
+            L_mm = part.length / mpp
+            w_mm = len(t) * fs * 0.55 * 0.3528 * S
+            if L_mm < w_mm * 1.4:
+                continue
+            n = max(1, int(L_mm // spacing_mm))
+            for k in range(n):
+                d = part.length * (k + 0.5) / n
+                p = part.interpolate(d)
+                if not c["frame"].contains(p):
+                    continue
+                if any(math.hypot(p.x - q.x, p.y - q.y) / mpp < min_gap_mm for q in placed.get(t, [])):
+                    continue
+                half = (w_mm / 2) * mpp
+                a = part.interpolate(max(0, d - half)); b = part.interpolate(min(part.length, d + half))
+                ang = math.degrees(math.atan2(b.y - a.y, b.x - a.x))
+                ang = ang - 180 if ang > 90 else (ang + 180 if ang < -90 else ang)
+                ax.text(p.x, p.y, t, rotation=ang, rotation_mode="anchor", ha="center", va="center",
+                        fontsize=pg.fs(fs), color=col, style="italic" if italic else "normal",
+                        fontweight="normal" if italic else "bold", zorder=60, path_effects=_halo(2.2 * S, halo))
+                placed.setdefault(t, []).append(p)
 
 
 # =====================================================================================
 # grids
-def _utm_grid(ax, ext, gw, mpp, pg, plain):
+def _utm_grid(ax, ext, gw, mpp, pg, col):
     S = pg.S
     steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000, 100000]
     step = next((s for s in steps if gw / s <= 9), steps[-1])
     gx = np.arange(math.ceil(ext[0] / step) * step, ext[1], step)
     gy = np.arange(math.ceil(ext[2] / step) * step, ext[3], step)
-    cl = 0.8 * S * mpp
-    col = "#666" if plain else "white"
+    clen = 0.8 * S * mpp
     for x in gx:
         for y in gy:
-            ax.plot([x - cl, x + cl], [y, y], color=col, lw=0.7 * S, alpha=0.8, zorder=15)
-            ax.plot([x, x], [y - cl, y + cl], color=col, lw=0.7 * S, alpha=0.8, zorder=15)
+            ax.plot([x - clen, x + clen], [y, y], color=col, lw=0.7 * S, alpha=0.8, zorder=30)
+            ax.plot([x, x], [y - clen, y + clen], color=col, lw=0.7 * S, alpha=0.8, zorder=30)
     ax.set_xticks(gx); ax.set_yticks(gy)
     ax.set_xticklabels([f"{v:.0f} E" for v in gx], fontsize=pg.fs(6.5))
     ax.set_yticklabels([f"{v:.0f} N" for v in gy], fontsize=pg.fs(6.5), rotation=90, va="center")
@@ -722,7 +919,7 @@ def _utm_grid(ax, ext, gw, mpp, pg, plain):
                    labelright=False, pad=2 * S)
 
 
-def _graticule(ax, crs, ext, pg, plain):
+def _graticule(ax, crs, ext, pg, col):
     S = pg.S
     to_ll = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
     to_m = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
@@ -733,19 +930,19 @@ def _graticule(ax, crs, ext, pg, plain):
     lo0, lo1, la0, la1 = min(lon), max(lon), min(lat), max(lat)
     secs = [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1200, 1800, 3600, 7200, 18000, 36000]
     step = next((s for s in secs if (lo1 - lo0) * 3600 / s <= 5), secs[-1]) / 3600.0
-    col = "#888" if plain else "white"
     xt, xl, yt, yl = [], [], [], []
+    wx, wy = ext[1] - ext[0], ext[3] - ext[2]
     for L in np.arange(math.ceil(lo0 / step) * step, lo1, step):
         la = np.linspace(la0, la1, 60); x, y = to_m.transform(np.full(60, L), la)
-        ax.plot(x, y, color=col, lw=0.5 * S, alpha=0.6, zorder=15)
+        ax.plot(x, y, color=col, lw=0.5 * S, alpha=0.6, zorder=30)
         xb = np.interp(ext[2], y, x)
-        if ext[0] + 0.03 * (ext[1] - ext[0]) < xb < ext[1] - 0.03 * (ext[1] - ext[0]):
+        if ext[0] + 0.03 * wx < xb < ext[1] - 0.03 * wx:
             xt.append(xb); xl.append(_dms(L, "E", "W"))
     for L in np.arange(math.ceil(la0 / step) * step, la1, step):
         lo = np.linspace(lo0, lo1, 60); x, y = to_m.transform(lo, np.full(60, L))
-        ax.plot(x, y, color=col, lw=0.5 * S, alpha=0.6, zorder=15)
+        ax.plot(x, y, color=col, lw=0.5 * S, alpha=0.6, zorder=30)
         yb = np.interp(ext[0], x, y)
-        if ext[2] + 0.03 * (ext[3] - ext[2]) < yb < ext[3] - 0.03 * (ext[3] - ext[2]):
+        if ext[2] + 0.03 * wy < yb < ext[3] - 0.03 * wy:
             yt.append(yb); yl.append(_dms(L, "N", "S"))
     ax.set_xticks(xt); ax.set_xticklabels(xl, fontsize=pg.fs(6.5))
     ax.set_yticks(yt); ax.set_yticklabels(yl, fontsize=pg.fs(6.5), rotation=90, va="center")
@@ -848,7 +1045,7 @@ def _stats(kind, plots, rep, vectors, gdfs, rasters, crs, aoi, frame, st, warn):
             from rasterio.features import geometry_mask
             from rasterio.transform import from_bounds as tfb
             tr = tfb(iext[0], iext[2], iext[1], iext[3], z.shape[1], z.shape[0])
-            mask &= geometry_mask([aoi], out_shape=z.shape, transform=tr, invert=True)
+            mask = mask & geometry_mask([aoi], out_shape=z.shape, transform=tr, invert=True)
         z = z[mask]; z = z[z > -1000]
         if not z.size:
             return None, []
@@ -866,23 +1063,27 @@ ROW_MM = 5.4
 
 
 def _legend_handles(ctx):
-    S = ctx["S"]
+    S, th = ctx["S"], ctx["th"]
     h = []
     if ctx["plots"]:
         lab = "Plot boundary" if ctx["T"]["id"] == "site_plan" else "Boundary"
-        h.append(MPoly([[0, 0]], closed=True, fc=(1, 0.15, 0.15, 0.2), ec="#ff2020", lw=2 * S, label=lab))
+        bc = th.get("boundary", "#ff2020")
+        h.append(MPoly([[0, 0]], closed=True, fc=(*to_rgb(bc), 0.2), ec=bc, lw=2 * S, label=lab))
         if ctx["T"]["boundary"].get("corners"):
-            h.append(Line2D([], [], marker="o", ls="none", mfc="white", mec="#ff2020", mew=1.3 * S, ms=6 * S, label="Boundary corner"))
+            h.append(Line2D([], [], marker="o", ls="none", mfc="white", mec=bc, mew=1.3 * S, ms=6 * S, label="Boundary corner"))
     seen = set()
     cbar = None
-    for e in ctx["legend"]:
+    ordered = [e for e in ctx["legend"] if e.get("group")] + [e for e in ctx["legend"] if not e.get("group")]
+    for e in ordered:
         if e["kind"] == "colorbar":
             cbar = e; continue
         key = (e["kind"], e["label"])
         if key in seen:
             continue
         seen.add(key)
-        if e["kind"] == "patch":
+        if e["kind"] == "header":
+            h.append(Line2D([], [], ls="none", label=e["label"]))
+        elif e["kind"] == "patch":
             pe_ = [pe.withStroke(linewidth=3 * S, foreground=e["halo"])] if e.get("halo") else None
             fc = e["fc"] if e["fc"] == "none" else (*to_rgb(e["fc"]), e.get("alpha", 1.0))
             h.append(MPoly([[0, 0]], closed=True, fc=fc, ec=e["ec"], lw=e.get("lw", 0.8 * S), label=e["label"], path_effects=pe_))
@@ -890,14 +1091,14 @@ def _legend_handles(ctx):
             pe_ = [pe.withStroke(linewidth=e["lw"] + 2.2 * S, foreground=e["halo"])] if e.get("halo") else None
             h.append(Line2D([], [], color=e["color"], lw=e["lw"], ls="--" if e.get("dash") else "-", label=e["label"], path_effects=pe_))
         elif e["kind"] == "marker":
-            h.append(Line2D([], [], marker="o", ls="none", mfc=e["color"], mec=e["ec"], ms=7 * S, label=e["label"]))
+            h.append(Line2D([], [], marker="o", ls="none", mfc=e["color"], mec=e["ec"], ms=e.get("ms", 7 * S), label=e["label"]))
     if ctx["T"]["boundary"].get("side_lengths") and ctx["plots"]:
-        h.append(Line2D([], [], ls="none", marker="s", ms=8 * S, mfc="white", mec="#ff2020", label="Side length (m)"))
+        h.append(Line2D([], [], ls="none", marker="s", ms=8 * S, mfc="white", mec=th.get("boundary", "#ff2020"), label="Side length (m)"))
     return h, cbar
 
 
 def _notes_lines(ctx, w):
-    chars = int(w / 1.62)
+    chars = int(w / (1.62 if ctx["th"].get("title_style") != "block" else 1.95))
     out = []
     for n in ctx["notes"]:
         out += textwrap.wrap(n, chars, subsequent_indent="    ") or [""]
@@ -906,7 +1107,7 @@ def _notes_lines(ctx, w):
 
 def _item_need(item, ctx, w):
     if item == "title":
-        return 34
+        return {"block": 40, "left": 30}.get(ctx["th"].get("title_style"), 34)
     if item == "scale":
         return 25
     if item == "notes":
@@ -943,13 +1144,15 @@ def _draw_panel(ctx, columns, panel):
             heights[tgt] += spare
         elif spare < 0:
             deficit = -spare
-            if "stats" in items and len(ctx["rows"]) > 4:
+            if deficit > 0 and "locator" in items:
+                red = min(deficit, heights["locator"] - 32); heights["locator"] -= red; deficit -= red
+            if deficit > 0 and "legend" in items:
+                red = min(deficit, heights["legend"] * 0.25); heights["legend"] -= red; deficit -= red
+            if deficit > 0 and "stats" in items and len(ctx["rows"]) > 4:
                 cut = min(len(ctx["rows"]) - 4, int(math.ceil(deficit / ROW_MM)))
                 ctx["max_rows"] = len(ctx["rows"]) - cut
                 heights["stats"] = _item_need("stats", ctx, w)
                 deficit -= cut * ROW_MM
-            if deficit > 0 and "locator" in items:
-                red = min(deficit, heights["locator"] - 30); heights["locator"] -= red; deficit -= red
             if deficit > 0 and "legend" in items:
                 heights["legend"] = max(20, heights["legend"] - deficit)
         y = y0 + h
@@ -961,24 +1164,65 @@ def _draw_panel(ctx, columns, panel):
 
 
 def _box(ctx, x0, y0, w, h, title=None):
-    pg, S = ctx["pg"], ctx["S"]
-    pg.rect(x0, y0, w, h, lw=0.7 * S, ec="#222")
+    pg, S, th = ctx["pg"], ctx["S"], ctx["th"]
+    if th.get("boxed", True):
+        pg.rect(x0, y0, w, h, lw=0.7 * S, ec=th["panel_edge"], fill=True, fc=th["panel_bg"], zorder=-1)
+    else:
+        pg.line(x0, y0 + h, x0 + w, y0 + h, lw=0.6 * S, color=th["panel_edge"])
     if title:
-        pg.text(x0 + 3, y0 + h - 4.5, title, 8.5, fontweight="bold", color="#222", va="center")
+        pg.text(x0 + (3 if th.get("boxed", True) else 0), y0 + h - 4.5, title, 8.5 if th.get("boxed", True) else 7.5,
+                fontweight="bold", color=th["heading"], va="center")
+
+
+def _fit(size, text, width_mm, per_char=0.55):
+    """Shrink a font size (pt) so text fits a width (A3 mm)."""
+    need = len(text) * size * per_char * 0.3528
+    return size if need <= width_mm else max(6.0, size * width_mm / need)
 
 
 def _p_title(ctx, x0, y0, w, h):
-    pg, S = ctx["pg"], ctx["S"]
-    _box(ctx, x0, y0, w, h)
-    pg.rect(x0, y0 + h - 12, w, 12, fill=True, fc=NAVY, ec="#222", lw=0.7 * S)
-    t = ctx["title"]
-    fs = min(15.0, 15.0 * (w / 104) * 24 / max(len(t), 1))
-    pg.text(x0 + w / 2, y0 + h - 6, t, fs, ha="center", va="center", fontweight="bold", color="white")
-    sub = ctx["subtitle"]
-    if sub:
-        pg.text(x0 + w / 2, y0 + h - 18.5, sub, min(9.5, 9.5 * (w / 104) * 48 / max(len(sub), 1)),
-                ha="center", va="center", color="#222")
-    pg.text(x0 + w / 2, y0 + 6.5, f"Scale 1:{ctx['denom']:,} ({ctx['paper']} print)", 9, ha="center", va="center", color="#444")
+    pg, S, th = ctx["pg"], ctx["S"], ctx["th"]
+    t, sub = ctx["title"], ctx["subtitle"]
+    scale_txt = f"Scale 1:{ctx['denom']:,} ({ctx['paper']} print)"
+    style = th.get("title_style", "bar")
+    if style == "bar":
+        _box(ctx, x0, y0, w, h)
+        pg.rect(x0, y0 + h - 12, w, 12, fill=True, fc=th["title_bar"], ec=th["panel_edge"], lw=0.7 * S, zorder=-0.5)
+        if th["id"] == "night":
+            pg.rect(x0, y0 + h - 12, 1.6, 12, fill=True, fc=th["accent"], ec="none")
+        pg.text(x0 + w / 2, y0 + h - 6, t, _fit(15, t, w - 6), ha="center", va="center", fontweight="bold", color=th["title_text"])
+        if sub:
+            pg.text(x0 + w / 2, y0 + h - 18.5, sub, _fit(9.5, sub, w - 6, 0.5), ha="center", va="center", color=th["text"])
+        pg.text(x0 + w / 2, y0 + 6.5, scale_txt, 8.5, ha="center", va="center", color=th["muted"])
+    elif style == "plain":
+        _box(ctx, x0, y0, w, h)
+        pg.text(x0 + w / 2, y0 + h - 9, t, _fit(16, t, w - 8, 0.56), ha="center", va="center", fontweight="bold", color=th["title_text"])
+        pg.line(x0 + 10, y0 + h - 15.5, x0 + w - 10, y0 + h - 15.5, lw=0.9 * S, color=th["accent"])
+        pg.line(x0 + 10, y0 + h - 16.6, x0 + w - 10, y0 + h - 16.6, lw=0.35 * S, color=th["accent"])
+        if sub:
+            pg.text(x0 + w / 2, y0 + h - 22, sub, _fit(9.5, sub, w - 8, 0.5), ha="center", va="center", style="italic", color=th["text"])
+        pg.text(x0 + w / 2, y0 + 5.5, scale_txt, 8.5, ha="center", va="center", color=th["muted"], style="italic")
+    elif style == "left":
+        pg.rect(x0, y0 + h - 2.2, 16, 2.2, fill=True, fc=th["accent"], ec="none")
+        pg.text(x0, y0 + h - 10, t, _fit(17, t, w, 0.58), ha="left", va="center", fontweight="bold", color=th["title_text"])
+        if sub:
+            pg.text(x0, y0 + h - 18, sub, _fit(9.5, sub, w, 0.5), ha="left", va="center", color=th["muted"])
+        pg.text(x0, y0 + 4, scale_txt.upper(), 6.8, ha="left", va="center", color=th["heading"])
+    else:  # block (engineering title block)
+        _box(ctx, x0, y0, w, h)
+        rows = [(h - 16, 16), (h - 28, 12), (0, 12)]
+        for yy, hh in rows[:2]:
+            pg.line(x0, y0 + yy, x0 + w, y0 + yy, lw=0.6 * S, color=th["panel_edge"])
+        pg.line(x0 + w * 0.55, y0, x0 + w * 0.55, y0 + 12, lw=0.6 * S, color=th["panel_edge"])
+        lab = dict(size=5.2, color=th["muted"], va="center")
+        pg.text(x0 + 2, y0 + h - 2.8, "TITLE", **lab)
+        pg.text(x0 + 2, y0 + h - 9.6, t.upper(), _fit(12, t, w - 4, 0.62), va="center", fontweight="bold", color=th["text"])
+        pg.text(x0 + 2, y0 + h - 18.8, "SUBJECT", **lab)
+        pg.text(x0 + 2, y0 + h - 23.8, sub or "-", _fit(8, sub or "-", w - 4, 0.62), va="center", color=th["text"])
+        pg.text(x0 + 2, y0 + 9.2, "SCALE", **lab)
+        pg.text(x0 + 2, y0 + 4.2, f"1:{ctx['denom']:,}", 9, va="center", fontweight="bold", color=th["text"])
+        pg.text(x0 + w * 0.55 + 2, y0 + 9.2, "SHEET / DATE", **lab)
+        pg.text(x0 + w * 0.55 + 2, y0 + 4.2, f"{ctx['paper']}  {ctx['date']}", 7, va="center", color=th["text"])
 
 
 def _locator_possible(ctx):
@@ -1001,34 +1245,33 @@ def _locator_possible(ctx):
 
 
 def _p_locator(ctx, x0, y0, w, h):
-    pg, S = ctx["pg"], ctx["S"]
+    pg, S, th = ctx["pg"], ctx["S"], ctx["th"]
     ext, gw, gh = ctx["ext"], ctx["gw"], ctx["gh"]
     mode = ctx["_loc"][0]
     _box(ctx, x0, y0, w, h, "LOCATION")
     iax = pg.axes(x0 + 3, y0 + 2, w - 6, h - 10)
     iax.set_xticks([]); iax.set_yticks([]); iax.set_aspect("equal")
+    iax.set_facecolor(th["panel_bg"])
     for sp in iax.spines.values():
-        sp.set_linewidth(0.6 * S)
-    _orig_plot = iax.plot
-    rect = Rectangle((ext[0], ext[2]), gw, gh, fill=False, ec="black", lw=1 * S, ls="--", zorder=10)
+        sp.set_linewidth(0.6 * S); sp.set_edgecolor(th["panel_edge"])
+    rect = Rectangle((ext[0], ext[2]), gw, gh, fill=False, ec=th["text"], lw=1 * S, ls="--", zorder=10)
+    bc = th.get("boundary", "#ff2020")
     if mode == "place":
         _, outer, inner = ctx["_loc"]
-        outer.plot(ax=iax, color="#eeeeee", edgecolor="#9a9a9a", linewidth=0.4 * S)
+        outer.plot(ax=iax, color=th["loc_fill"], edgecolor=th["loc_edge"], linewidth=0.4 * S)
         if inner is not None:
-            inner.plot(ax=iax, color="#fff2b3", edgecolor="#666", linewidth=0.7 * S)
-            nm = ctx["places"]
+            inner.plot(ax=iax, color=th["loc_hl"], edgecolor=th["muted"], linewidth=0.7 * S)
         b = outer.total_bounds
         iax.set_xlim(b[0], b[2]); iax.set_ylim(b[1], b[3])
-        # AOI: outline if visible, otherwise a marker
         if gw / (b[2] - b[0]) > 0.04:
             iax.add_patch(rect)
         p = ctx["center_pt"]
-        iax.scatter([p.x], [p.y], s=40 * S * S, marker="s", c="#ff2020", edgecolors="white", linewidths=0.8 * S, zorder=11)
+        iax.scatter([p.x], [p.y], s=40 * S * S, marker="s", c=bc, edgecolors="white", linewidths=0.8 * S, zorder=11)
         lvl = ctx["places"]
         if lvl:
             first = next((lvl[k] for k in ("district", "block", "circle", "village", "town") if k in lvl), "")
             if first:
-                pg.text(x0 + w - 3, y0 + h - 4.5, first, 7, ha="right", va="center", color="#555")
+                pg.text(x0 + w - 3, y0 + h - 4.5, first, 7, ha="right", va="center", color=th["muted"])
         iax.set_xlabel(""); iax.set_ylabel("")
         return
     if mode == "raster":
@@ -1052,19 +1295,19 @@ def _p_locator(ctx, x0, y0, w, h):
         allb = [ctx["gdfs"][i].total_bounds for i in range(len(ctx["vectors"]))]
         b = (min(x[0] for x in allb), min(x[1] for x in allb), max(x[2] for x in allb), max(x[3] for x in allb))
         for i, v in enumerate(ctx["vectors"]):
-            ctx["gdfs"][i].plot(ax=iax, color="#bbbbbb", linewidth=0.4 * S, edgecolor="#888")
+            ctx["gdfs"][i].plot(ax=iax, color=th["loc_fill"], linewidth=0.4 * S, edgecolor=th["loc_edge"])
         iax.set_xlim(min(b[0], ext[0]), max(b[2], ext[1])); iax.set_ylim(min(b[1], ext[2]), max(b[3], ext[3]))
     if ctx["aoi"] is not None:
         a = ctx["aoi"]
         for poly in (a.geoms if hasattr(a, "geoms") else [a]):
             xs, ys = poly.exterior.xy
-            iax.add_patch(MPoly(np.c_[xs, ys], closed=True, fc="#ff2020", ec="#ff2020", lw=1 * S, alpha=0.85, zorder=9))
+            iax.add_patch(MPoly(np.c_[xs, ys], closed=True, fc=bc, ec=bc, lw=1 * S, alpha=0.85, zorder=9))
     iax.add_patch(rect)
     iax.set_xlabel(""); iax.set_ylabel("")
 
 
 def _p_legend(ctx, x0, y0, w, h):
-    pg, S = ctx["pg"], ctx["S"]
+    pg, S, th = ctx["pg"], ctx["S"], ctx["th"]
     _box(ctx, x0, y0, w, h, "LEGEND")
     handles, cbar = ctx["handles"], ctx["cbar"]
     cb_h = 16 if cbar else 0
@@ -1075,45 +1318,50 @@ def _p_legend(ctx, x0, y0, w, h):
         need = rows * 8 * 2.05 * 0.3528 + 3
         f = min(1.0, (h - 9 - cb_h) / need) if need > 0 else 1.0
         fs = 8 * max(0.65, f) * (0.9 if ncol == 2 else 1)
-        lax.legend(handles=handles, loc="upper left", frameon=False, fontsize=pg.fs(fs), handlelength=2.6,
-                   labelspacing=0.75 * max(0.5, f), borderaxespad=0.2, ncol=ncol, columnspacing=1.0)
+        leg = lax.legend(handles=handles, loc="upper left", frameon=False, fontsize=pg.fs(fs), handlelength=2.6,
+                         labelspacing=0.75 * max(0.5, f), borderaxespad=0.2, ncol=ncol, columnspacing=1.0,
+                         labelcolor=th["text"])
+        for t, hd in zip(leg.get_texts(), handles):
+            if isinstance(hd, Line2D) and hd.get_linestyle() in ("None", "none", "") and hd.get_marker() in ("None", None, "none", ""):
+                t.set_fontweight("bold"); t.set_color(th["heading"])
     if cbar:
         cax = pg.axes(x0 + 6, y0 + 7, w - 12, 3.2)
         grad = np.linspace(0, 1, 256)[None, :]
         cax.imshow(grad, aspect="auto", cmap=cbar["cmap"], extent=(cbar["vmin"], cbar["vmax"], 0, 1))
         cax.set_yticks([])
-        cax.tick_params(labelsize=pg.fs(6.5), length=2 * S, width=0.5 * S, pad=1 * S)
+        cax.tick_params(labelsize=pg.fs(6.5), length=2 * S, width=0.5 * S, pad=1 * S, colors=th["muted"])
         cax.set_xticks(np.linspace(cbar["vmin"], cbar["vmax"], 4))
         cax.set_xticklabels([f"{v:,.0f}" for v in np.linspace(cbar["vmin"], cbar["vmax"], 4)])
-        pg.text(x0 + w / 2, y0 + 12.2, cbar["label"], 7, ha="center", va="center", color="#333")
+        pg.text(x0 + w / 2, y0 + 12.2, cbar["label"], 7, ha="center", va="center", color=th["muted"])
 
 
 def _p_stats(ctx, x0, y0, w, h):
-    pg = ctx["pg"]
+    pg, th = ctx["pg"], ctx["th"]
     _box(ctx, x0, y0, w, h, ctx["stats_title"])
     rows = ctx["rows"]
     mr = ctx.get("max_rows", len(rows))
     if mr < len(rows):
-        keep = rows[:mr - 2] + [(f"+ {len(rows) - mr + 1} more", "")] + [rows[-1]]
-        rows = keep
+        rows = rows[:mr - 2] + [(f"+ {len(rows) - mr + 1} more", "")] + [rows[-1]]
+    pad = 4 if th.get("boxed", True) else 0.5
     yy = y0 + h - 11
     for k, v in rows:
         bold = k == "Total"
         lab = k if len(k) <= 30 else k[:28] + "…"
-        pg.text(x0 + 4, yy, lab, 7.6, color="#111" if bold else "#444", va="center", fontweight="bold" if bold else "normal")
-        pg.text(x0 + w - 4, yy, v, 8, fontweight="bold", color="#111", ha="right", va="center")
+        pg.text(x0 + pad, yy, lab, 7.6, color=th["text"] if bold else th["muted"], va="center", fontweight="bold" if bold else "normal")
+        pg.text(x0 + w - pad, yy, v, _fit(8, v, w * 0.62), fontweight="bold", color=th["text"], ha="right", va="center")
         yy -= ROW_MM
 
 
 def _p_scale(ctx, x0, y0, w, h):
-    pg, S, mpp = ctx["pg"], ctx["S"], ctx["mpp"]
+    pg, S, mpp, th = ctx["pg"], ctx["S"], ctx["mpp"], ctx["th"]
     _box(ctx, x0, y0, w, h)
     na_x, na_y = x0 + 12, y0
-    for sgn, fc in ((-1, "#111"), (1, "white")):
+    nc = th.get("north", "#111")
+    for sgn, fc in ((-1, nc), (1, th["panel_bg"])):
         pg.fig.add_artist(MPoly([[pg.x(na_x), pg.y(na_y + 18)], [pg.x(na_x + sgn * 4.5), pg.y(na_y + 3)],
                                  [pg.x(na_x), pg.y(na_y + 7)]], closed=True, transform=pg.fig.transFigure,
-                                fc=fc, ec="#111", lw=0.8 * S))
-    pg.text(na_x, na_y + 21.5, "N", 12, ha="center", va="center", fontweight="bold")
+                                fc=fc, ec=nc, lw=0.8 * S))
+    pg.text(na_x, na_y + 21.5, "N", 12, ha="center", va="center", fontweight="bold", color=nc)
     avail = w - 36
     sb_len = _nice_le(avail * S * mpp, [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000,
                                          10000, 20000, 25000, 50000, 100000, 200000])
@@ -1125,24 +1373,25 @@ def _p_scale(ctx, x0, y0, w, h):
     km = sb_len >= 1000
     sx0, sy0 = x0 + 26, y0 + 11
     for i in range(segs):
-        pg.rect(sx0 + i * sb_mm / segs, sy0, sb_mm / segs, 2.2, fill=True, fc="#111" if i % 2 == 0 else "white", ec="#111", lw=0.7 * S)
+        pg.rect(sx0 + i * sb_mm / segs, sy0, sb_mm / segs, 2.2, fill=True, fc=nc if i % 2 == 0 else th["panel_bg"], ec=nc, lw=0.7 * S)
     for i in range(segs + 1):
         v = i * sb_len / segs
-        pg.text(sx0 + i * sb_mm / segs, sy0 + 4.4, f"{v / 1000:g}" if km else f"{v:g}", 7, ha="center")
-    pg.text(sx0 + sb_mm + 2.5, sy0 + 1.1, "km" if km else "m", 7.5, va="center")
-    pg.text(sx0 + sb_mm / 2, sy0 - 5, f"1:{ctx['denom']:,} at {ctx['paper']}", 8, ha="center", color="#333")
+        pg.text(sx0 + i * sb_mm / segs, sy0 + 4.4, f"{v / 1000:g}" if km else f"{v:g}", 7, ha="center", color=th["text"])
+    pg.text(sx0 + sb_mm + 2.5, sy0 + 1.1, "km" if km else "m", 7.5, va="center", color=th["text"])
+    pg.text(sx0 + sb_mm / 2, sy0 - 5, f"1:{ctx['denom']:,} at {ctx['paper']}", 8, ha="center", color=th["muted"])
 
 
 def _p_notes(ctx, x0, y0, w, h):
-    pg = ctx["pg"]
+    pg, th = ctx["pg"], ctx["th"]
     _box(ctx, x0, y0, w, h)
+    pad = 3 if th.get("boxed", True) else 0
     yy = y0 + h - 4.5
     for ln in _notes_lines(ctx, w):
-        pg.text(x0 + 3, yy, ln, 6.6, color="#333", va="center"); yy -= 3.4
+        pg.text(x0 + pad, yy, ln, 6.6, color=th["muted"], va="center"); yy -= 3.4
     pb = ctx["prepared_by"]
     if pb:
-        pg.text(x0 + 3, y0 + 2.8, f"Prepared by: {pb}", 7 if len(pb) < 48 * w / 104 else 6.0,
-                fontweight="bold", color=NAVY, va="center")
+        pg.text(x0 + pad, y0 + 2.8, f"Prepared by: {pb}", _fit(7, "Prepared by: " + pb, w - 2 * pad),
+                fontweight="bold", color=th["accent"], va="center")
 
 
 _DRAW = {"title": _p_title, "locator": _p_locator, "legend": _p_legend, "stats": _p_stats,

@@ -8,7 +8,10 @@ import geopandas as gpd
 import pyogrio
 from shapely import force_2d, make_valid
 
-VECTOR_EXT = (".shp", ".gpkg", ".kml", ".kmz", ".geojson", ".json", ".csv")
+VECTOR_EXT = (".shp", ".gpkg", ".kml", ".kmz", ".geojson", ".json", ".geojsonl", ".geojsons", ".topojson", ".csv",
+              ".dxf", ".gpx", ".tab", ".mif", ".gml", ".fgb", ".sqlite", ".db")
+VECTOR_DIRS = (".gdb",)                       # file geodatabase folders
+_SKIP_LAYERS = {"track_points", "route_points"}  # GPX duplicates of tracks/routes
 
 _LAT = re.compile(r"^(lat|latitude|y_lat|lat_dd|lat_deg)$", re.I)
 _LON = re.compile(r"^(lon|long|longitude|lng|x_lon|lon_dd|long_dd|lon_deg)$", re.I)
@@ -66,6 +69,17 @@ class VLayer:
                     out.append(f)
         return out
 
+    def numeric_fields(self):
+        """Numeric fields with spread (usable for graduated colours)."""
+        out = []
+        for f in self.fields:
+            s = self.gdf[f]
+            if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+                v = s.dropna()
+                if len(v) >= 3 and v.nunique() >= 3 and f.lower() not in ("id", "fid", "objectid", "shape_leng", "shape_area"):
+                    out.append(f)
+        return out
+
     def label_fields(self):
         return [f for f in self.fields if self.gdf[f].notna().all() and len(self.gdf)]
 
@@ -102,6 +116,8 @@ def read_any(path):
             subs = [None]
         out = []
         for s in subs if len(subs) > 1 else [None]:
+            if s and s.lower() in _SKIP_LAYERS:
+                continue
             try:
                 lyr = VLayer(path, layer=s)
                 if len(lyr):
@@ -114,9 +130,11 @@ def read_any(path):
 def find_vectors(folder):
     out = []
     for root, dirs, files in os.walk(folder):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        gdbs = [d for d in dirs if d.lower().endswith(VECTOR_DIRS)]
+        out += [os.path.join(root, d) for d in gdbs]
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in gdbs]
         for f in sorted(files):
-            if f.lower().endswith(VECTOR_EXT):
+            if f.lower().endswith(VECTOR_EXT) and not f.lower().endswith(".aux.xml"):
                 # skip sidecar CSVs that describe raster classes
                 if f.lower().endswith(".csv") and os.path.exists(os.path.join(root, f[:-4] + ".tif")):
                     continue

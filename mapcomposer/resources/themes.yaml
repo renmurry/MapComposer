@@ -1,0 +1,173 @@
+# MapComposer visual themes. Every map can be drawn in any theme.
+# Colours are hex; fonts are bundled (resources/fonts) so output looks the same on every PC.
+# Copy a block, give it a new key and name to make your own theme.
+
+classic:
+  name: Classic
+  description: Navy title bar, white panels, black frame - the standard office look.
+  font: Work Sans
+  title_style: bar          # bar | plain | left | block
+  page_bg: "#ffffff"
+  frame: "#222222"
+  frame_double: true
+  panel_bg: "#ffffff"
+  panel_edge: "#222222"
+  boxed: true
+  title_bar: "#1f3b57"
+  title_text: "#ffffff"
+  heading: "#222222"
+  text: "#111111"
+  muted: "#4a4a4a"
+  accent: "#1f3b57"
+  map_bg_plain: "#f7f7f4"
+  map_bg_image: "#ebebeb"
+  map_edge: "#111111"
+  grid_plain: "#8a8a8a"
+  grid_image: "#ffffff"
+  admin_edge_plain: "#4a4a4a"
+  soft: ["#fbb4ae", "#b3cde3", "#ccebc5", "#decbe4", "#fed9a6", "#ffffcc", "#e5d8bd", "#fddaec", "#b3e2cd", "#fdcdac", "#cbd5e8", "#f4cae4", "#e6f5c9", "#fff2ae", "#f1e2cc"]
+  label_plain: "#222222"
+  label_halo_plain: "#ffffff"
+  loc_fill: "#eeeeee"
+  loc_edge: "#9a9a9a"
+  loc_hl: "#fff2b3"
+  contour_plain: "#a0522d"
+  ramp: ["#ffffcc", "#c2e699", "#78c679", "#31a354", "#006837"]
+  boundary: "#ff2020"
+  north: "#111111"
+
+atlas:
+  name: Atlas
+  description: Cream paper, serif type, earthy colours - like a printed atlas plate.
+  font: Lora
+  title_style: plain
+  page_bg: "#f6f0e2"
+  frame: "#5b4636"
+  frame_double: true
+  panel_bg: "#fbf7ee"
+  panel_edge: "#8c7a66"
+  boxed: true
+  title_bar: "#5b4636"
+  title_text: "#3b2f25"
+  heading: "#5b4636"
+  text: "#3b2f25"
+  muted: "#6b5a49"
+  accent: "#8b2e16"
+  map_bg_plain: "#efe6d2"
+  map_bg_image: "#e8dfcc"
+  map_edge: "#5b4636"
+  grid_plain: "#a08c74"
+  grid_image: "#fff8ea"
+  admin_edge_plain: "#7a6450"
+  soft: ["#e9c9a8", "#c9d9b6", "#d8c3dd", "#f1dfa4", "#b9d3d6", "#e6b8a2", "#d5cfa6", "#c7bfa9", "#ead1b8", "#bcd0b0", "#dcc6c0", "#d9e0c0", "#cfc1d6", "#efd7a6", "#c3d6cf"]
+  label_plain: "#3b2f25"
+  label_halo_plain: "#f6f0e2"
+  loc_fill: "#ece2cc"
+  loc_edge: "#a08c74"
+  loc_hl: "#e9c48a"
+  contour_plain: "#8b5a2b"
+  ramp: ["#f7ecd0", "#e8c48a", "#d4935a", "#b0603a", "#7d3420"]
+  boundary: "#b3261e"
+  north: "#3b2f25"
+
+night:
+  name: Night
+  description: Dark charcoal layout with teal accents - strong contrast for imagery and screens.
+  font: Outfit
+  title_style: bar
+  page_bg: "#15191e"
+  frame: "#3a4450"
+  frame_double: false
+  panel_bg: "#1d232a"
+  panel_edge: "#3a4450"
+  boxed: true
+  title_bar: "#0f3b44"
+  title_text: "#e6fffb"
+  heading: "#4fd1c5"
+  text: "#e6e9ec"
+  muted: "#9aa5b1"
+  accent: "#4fd1c5"
+  map_bg_plain: "#222a32"
+  map_bg_image: "#1d232a"
+  map_edge: "#5a6672"
+  grid_plain: "#4a5562"
+  grid_image: "#ffffff"
+  admin_edge_plain: "#c8d3de"
+  soft: ["#2f4858", "#33658a", "#55818f", "#3d5a40", "#5c4d7d", "#6b4f3a", "#2e5e4e", "#4d4d6b", "#6a3e4f", "#3e5c6b", "#58603a", "#4a3f5c", "#2f5d62", "#5e4b3c", "#3b4f6b"]
+  label_plain: "#f2f5f7"
+  label_halo_plain: "#15191e"
+  loc_fill: "#2a323b"
+  loc_edge: "#4a5562"
+  loc_hl: "#2c7a72"
+  contour_plain: "#d9b38c"
+  ramp: ["#20313b", "#1f5a63", "#2a8a86", "#4fd1c5", "#c6f7e9"]
+  boundary: "#ff4d4d"
+  north: "#e6e9ec"
+
+minimal:
+  name: Minimal
+  description: White, open, no boxes - thin rules and a single accent colour.
+  font: Instrument Sans
+  title_style: left
+  page_bg: "#ffffff"
+  frame: "#cfcfcf"
+  frame_double: false
+  panel_bg: "#ffffff"
+  panel_edge: "#d9d9d9"
+  boxed: false
+  title_bar: "#e4572e"
+  title_text: "#111111"
+  heading: "#9a9a9a"
+  text: "#1a1a1a"
+  muted: "#666666"
+  accent: "#e4572e"
+  map_bg_plain: "#fafafa"
+  map_bg_image: "#f0f0f0"
+  map_edge: "#bdbdbd"
+  grid_plain: "#c4c4c4"
+  grid_image: "#ffffff"
+  admin_edge_plain: "#9e9e9e"
+  soft: ["#f3f3f3", "#e8eef4", "#eef4ea", "#f6eee6", "#f1ecf5", "#f7f4e6", "#e9f3f3", "#f5eaea", "#edf0f6", "#f2f5ea", "#f6efe9", "#eceef1", "#f4f1f7", "#eef6f2", "#f7f2ec"]
+  label_plain: "#333333"
+  label_halo_plain: "#ffffff"
+  loc_fill: "#f2f2f2"
+  loc_edge: "#c4c4c4"
+  loc_hl: "#fbd3c5"
+  contour_plain: "#b07d62"
+  ramp: ["#fff5eb", "#fdbe85", "#fd8d3c", "#e6550d", "#a63603"]
+  boundary: "#e4572e"
+  north: "#1a1a1a"
+
+blueprint:
+  name: Blueprint
+  description: Engineering-drawing style - monospace type, blue linework, tabular title block.
+  font: IBM Plex Mono
+  title_style: block
+  page_bg: "#eef3f8"
+  frame: "#1b4f8a"
+  frame_double: true
+  panel_bg: "#ffffff"
+  panel_edge: "#1b4f8a"
+  boxed: true
+  title_bar: "#1b4f8a"
+  title_text: "#1b4f8a"
+  heading: "#1b4f8a"
+  text: "#0d2a4a"
+  muted: "#3d5f85"
+  accent: "#1b4f8a"
+  map_bg_plain: "#f7fafc"
+  map_bg_image: "#e6edf5"
+  map_edge: "#1b4f8a"
+  grid_plain: "#7fa3c9"
+  grid_image: "#dfeaf7"
+  admin_edge_plain: "#1b4f8a"
+  soft: ["#dbe8f5", "#e7f0e3", "#f1e9f5", "#f8f0dc", "#e0f1f1", "#f5e3e3", "#e8e8f7", "#eef3dd", "#f3e8de", "#dff0ea", "#ece3f3", "#f6ecda", "#e2ecf6", "#eff6e4", "#f4e6ec"]
+  label_plain: "#0d2a4a"
+  label_halo_plain: "#ffffff"
+  loc_fill: "#e3ecf6"
+  loc_edge: "#7fa3c9"
+  loc_hl: "#bcd4ee"
+  contour_plain: "#5a7fa8"
+  ramp: ["#eaf2fb", "#b6d0ee", "#6f9fd8", "#2f6db5", "#123f7a"]
+  boundary: "#d62828"
+  north: "#1b4f8a"

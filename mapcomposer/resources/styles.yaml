@@ -18,7 +18,7 @@ roles:
 
 # Field names that are recognised automatically for each kind of classification.
 class_fields:
-  road:     [road_type, roadtype, rd_type, type, class, category, surface, name]
+  road:     [road_type, roadtype, rd_type, type, class, category, surface]
   drainage: [stream_order, strahler, order, stream_ord, grid_code, so, ord]
   lulc:     [lulc, lulc_class, class, class_name, landuse, land_use, lu_class, l1_class, l2_class, category, description, desc, name, type]
   admin:    [name, ward_name, ward, village, vill_name, village_name, district, dist_name, block, circle, town, locality, colony, label]

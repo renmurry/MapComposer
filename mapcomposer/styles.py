@@ -58,3 +58,44 @@ def class_colors(kind, values):
 def pretty(s):
     s = str(s).replace("_", " ").strip()
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
+
+
+# ---------------------------------------------------------------- themes & fonts
+_theme_cache = {}
+_fonts_loaded = False
+
+
+def load_fonts():
+    """Register the bundled OFL fonts with matplotlib (once)."""
+    global _fonts_loaded
+    if _fonts_loaded:
+        return
+    import logging
+    import matplotlib.font_manager as fm
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+    d = resource("fonts")
+    if os.path.isdir(d):
+        for f in os.listdir(d):
+            if f.lower().endswith((".ttf", ".otf")):
+                try:
+                    fm.fontManager.addfont(os.path.join(d, f))
+                except Exception:
+                    pass
+    _fonts_loaded = True
+
+
+def load_themes():
+    """Built-in themes, overridden/extended by %APPDATA%/MapComposer/themes.yaml."""
+    out = {}
+    for p in (resource("themes.yaml"), os.path.join(user_dir(), "themes.yaml")):
+        if os.path.exists(p):
+            mt = os.path.getmtime(p)
+            if _theme_cache.get(p, (None,))[0] != mt:
+                with open(p, encoding="utf-8") as f:
+                    _theme_cache[p] = (mt, yaml.safe_load(f) or {})
+            for k, v in _theme_cache[p][1].items():
+                base = dict(out.get(k) or out.get("classic") or {})
+                base.update(v or {})
+                base["id"] = k
+                out[k] = base
+    return out

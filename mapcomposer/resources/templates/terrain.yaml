@@ -1,0 +1,21 @@
+# Terrain map: elevation (DSM/DEM) with hillshade, colour ramp, contours and elevation statistics.
+id: terrain
+name: Terrain (DSM / DEM)
+description: Elevation colour ramp with hillshade and contours; min / max / mean elevation.
+suggest:
+  - {has_raster: elevation, points: 45}
+page: {paper: A3, orientation: landscape}
+text:
+  title: "{name} — TERRAIN"
+  subtitle: "{place_line}"
+extent: {roles: [Boundary, Admin], rasters: [elevation], margin_mm: 15}
+grid: utm
+basemap: false
+elevation: {hillshade: true, opacity: 1.0}
+boundary: {side_lengths: false, corners: false, area_label: true}
+labels: {Admin: true, Points: true}
+stats: elevation
+panel: [title, locator, legend, stats, scale, notes]
+panel_portrait: [[title, scale, notes], [legend, stats], [locator]]
+notes: [crs, elevation_source, source, contours, north_date, disclaimer]
+contours: {default: true, interval: 2}

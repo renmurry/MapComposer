@@ -1,0 +1,22 @@
+# Site plan: one or a few plot boundaries on a drone ortho.
+id: site_plan
+name: Site plan (plot boundary)
+description: Plot boundary on an ortho with side lengths, corner points, area in m² and sq ft.
+suggest:                       # context rules - points are added when a rule matches
+  - {has_role: Boundary, points: 40}
+  - {has_raster: rgb, points: 20}
+  - {max_features: {role: Boundary, n: 10}, points: 10}
+page: {paper: A3, orientation: landscape}
+text:
+  title: "{name} — SITE PLAN"
+  subtitle: "Plot boundary on UAV orthophoto"
+extent: {roles: [Boundary], margin_mm: 25}
+grid: utm                      # utm | latlon | none
+basemap: true                  # draw the RGB / satellite image if one is loaded
+boundary: {side_lengths: true, corners: true, area_label: true, fill: true}
+labels: {Admin: true, Points: true}
+stats: plot_details            # plot_details | admin_areas | class_areas | network_lengths | elevation | none
+panel: [title, locator, legend, stats, scale, notes]
+panel_portrait: [[title, scale, notes], [legend, stats], [locator]]
+notes: [crs, imagery, positioning, measurements, contours, north_date, disclaimer]
+contours: {default: false, interval: 2}

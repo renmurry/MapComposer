@@ -1,0 +1,22 @@
+# Thematic map: land use / land cover or any classified raster or classed polygons.
+id: thematic
+name: Thematic (LULC / classified)
+description: Classified raster or classed polygons with a class legend and area by class (ha and %).
+suggest:
+  - {has_raster: classified, points: 65}
+  - {has_role: Thematic, points: 65}
+page: {paper: A3, orientation: landscape}
+text:
+  title: "{name} — LAND USE / LAND COVER"
+  subtitle: "{place_line}"
+extent: {roles: [Boundary, Thematic, Admin], rasters: [classified], margin_mm: 15}   # first role found sets the extent
+clip_to_boundary: true         # show classes only inside the boundary, if there is one
+grid: latlon
+basemap: false
+boundary: {side_lengths: false, corners: false, area_label: false}
+labels: {Admin: true, Points: false}
+stats: class_areas
+panel: [title, locator, legend, stats, scale, notes]
+panel_portrait: [[title, scale, notes], [legend], [stats, locator]]
+notes: [crs, imagery, source, measurements, north_date, disclaimer]
+contours: {default: false, interval: 10}

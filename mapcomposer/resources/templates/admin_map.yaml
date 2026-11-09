@@ -1,0 +1,21 @@
+# Administrative / ward / village map: many named polygons, labelled, with an area table.
+id: admin_map
+name: Admin / ward map
+description: Named polygons (wards, villages, districts) labelled on the map with an area table.
+suggest:
+  - {has_role: Admin, points: 60}
+  - {min_features: {role: Admin, n: 3}, points: 10}
+page: {paper: A3, orientation: landscape}
+text:
+  title: "{name}"
+  subtitle: "{place_line}"
+extent: {roles: [Admin, Boundary], margin_mm: 18}
+grid: latlon
+basemap: true
+boundary: {side_lengths: false, corners: false, area_label: false}
+labels: {Admin: true, Points: true}
+stats: admin_areas
+panel: [title, locator, legend, stats, scale, notes]
+panel_portrait: [[title, scale, notes], [legend, stats], [locator]]
+notes: [crs, imagery, source, measurements, north_date, disclaimer]
+contours: {default: false, interval: 10}

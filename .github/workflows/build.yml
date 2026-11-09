@@ -1,0 +1,59 @@
+name: Build Windows app
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller==6.16.0
+
+      - name: Build MapComposer.exe
+        run: >
+          pyinstaller --noconfirm --clean --windowed --name MapComposer
+          --add-data "mapcomposer/resources;mapcomposer/resources"
+          --collect-all rasterio --collect-all pyproj --collect-all shapely
+          --collect-all pyogrio --collect-all geopandas
+          --collect-data matplotlib --hidden-import yaml
+          MapComposer.py
+
+      - name: Self-test the packaged app
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD "selftest.txt"
+          $p = Start-Process -FilePath "dist\MapComposer\MapComposer.exe" -ArgumentList "--selftest", "`"$report`"" -Wait -PassThru
+          if (Test-Path $report) { Get-Content $report }
+          if ($p.ExitCode -ne 0) { Write-Error "Self-test failed (exit code $($p.ExitCode))"; exit 1 }
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\MapComposer -DestinationPath MapComposer-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MapComposer-windows
+          path: MapComposer-windows.zip
+          retention-days: 30
+
+      - name: Attach to release (version tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MapComposer-windows.zip

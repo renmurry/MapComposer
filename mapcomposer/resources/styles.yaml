@@ -1,0 +1,54 @@
+# MapComposer style library.
+# Edit colours / widths here. Rules are matched top-to-bottom against a feature's class value
+# (case-insensitive regular expression); the first match wins. Unmatched classes get the fallback palette.
+
+fallback_palette: ["#ffb000", "#33d6ff", "#ff6ec7", "#9dff57", "#c58cff", "#ff8a3d", "#00ffa3", "#ffffff",
+                   "#e6194b", "#4363d8", "#f58231", "#911eb4", "#46f0f0", "#bcf60c", "#fabebe", "#008080"]
+
+roles:
+  Boundary:  {edge: "#ff2020", fill: "#ff2020", fill_alpha: 0.12, width: 2.4, halo: "#ffffff"}
+  Admin:     {edge: "#ffffff", edge_plain: "#4a4a4a", fill_alpha: 0.0, fill_alpha_plain: 0.55, width: 1.4, halo: "#1a1a1a"}
+  Thematic:  {edge: "#333333", fill_alpha: 0.75, fill_alpha_on_image: 0.55, width: 0.4}
+  Road:      {color: "#ffb000", width: 3.0, halo: "#1a1a1a"}
+  Drainage:  {color: "#1e90ff", width: 1.8, halo: "#ffffff"}
+  Building:  {edge: "#ffffff", fill_alpha: 0.12, width: 1.2, halo: "#1a1a1a"}
+  Points:    {color: "#ff2020", size: 7, edge: "#ffffff"}
+  Contour:   {color: "#ffe9a8", color_plain: "#a0522d", width: 0.8}
+  Other:     {color: "#b6ff3b", width: 1.6, halo: "#1a1a1a"}
+
+# Field names that are recognised automatically for each kind of classification.
+class_fields:
+  road:     [road_type, roadtype, rd_type, type, class, category, surface, name]
+  drainage: [stream_order, strahler, order, stream_ord, grid_code, so, ord]
+  lulc:     [lulc, lulc_class, class, class_name, landuse, land_use, lu_class, l1_class, l2_class, category, description, desc, name, type]
+  admin:    [name, ward_name, ward, village, vill_name, village_name, district, dist_name, block, circle, town, locality, colony, label]
+
+road:
+  - {match: "\\bnh\\b|national", color: "#e31a1c", width: 4.2}
+  - {match: "^ah|asian", color: "#ff7f00", width: 3.8}
+  - {match: "\\bsh\\b|state", color: "#ffb000", width: 3.4}
+  - {match: "mdr|odr|district|major", color: "#ffe14d", width: 2.8}
+  - {match: "approach|village|vr\\b|link|local|access|internal", color: "#33d6ff", width: 2.2}
+  - {match: "foot|path|track|trail|kutcha", color: "#ffffff", width: 1.4, dash: true}
+
+# Drainage: width grows with stream order when an order field is found.
+drainage_order: {color: "#1e90ff", base_width: 0.6, per_order: 0.55}
+
+# Land use / land cover. Order matters (more specific first).
+lulc:
+  - {match: "built|settle|urban|rural|residen|commerc|industr|habitation|town|village", color: "#e31a1c"}
+  - {match: "jhum|shifting", color: "#f4a582"}
+  - {match: "plantation|orchard|horti|tea|rubber|areca|bamboo", color: "#a6d96a"}
+  - {match: "crop|agri|cultivat|paddy|terrace|fallow|kharif|rabi", color: "#ffd92f"}
+  - {match: "dense.*forest|very dense|evergreen", color: "#00441b"}
+  - {match: "open.*forest|degraded|moderate", color: "#41ab5d"}
+  - {match: "forest|tree|woodland|vegetation", color: "#1a9850"}
+  - {match: "scrub|shrub|bush", color: "#b8e186"}
+  - {match: "grass|meadow|pasture", color: "#d9ef8b"}
+  - {match: "wet|marsh|swamp", color: "#7fcdbb"}
+  - {match: "water|river|stream|lake|pond|reservoir|tank|canal", color: "#2c7fb8"}
+  - {match: "waste|barren|rock|sand|mining|quarry|landslide|bare", color: "#bdbdbd"}
+  - {match: "snow|glacier|ice", color: "#ffffff"}
+
+elevation_cmap: ["#1a6b3b", "#5aa64b", "#b9d77a", "#f0e5a0", "#d9a95f", "#a8683a", "#7d4a2b", "#ffffff"]
+continuous_cmap: viridis

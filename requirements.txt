@@ -1,0 +1,10 @@
+numpy==2.5.3
+pandas==3.0.5
+PySide6==6.12.0
+rasterio==1.5.2
+shapely==2.2.0
+pyproj==3.8.0
+pyogrio==0.13.0
+geopandas==1.2.0
+matplotlib==3.11.2
+PyYAML==6.0.3

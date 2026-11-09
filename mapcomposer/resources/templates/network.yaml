@@ -1,0 +1,22 @@
+# Network map: roads and/or drainage classed by type or stream order, with lengths by class.
+id: network
+name: Network (roads / drainage)
+description: Road or drainage lines classed by attribute, with total length per class.
+suggest:
+  - {has_role: Road, points: 30}
+  - {has_role: Drainage, points: 30}
+  - {lines_only: true, points: 20}
+page: {paper: A3, orientation: landscape}
+text:
+  title: "{name} — NETWORK MAP"
+  subtitle: "{place_line}"
+extent: {roles: [Road, Drainage, Boundary, Admin], margin_mm: 15, mode: union}   # union = all listed roles
+grid: latlon
+basemap: true
+boundary: {side_lengths: false, corners: false, area_label: false}
+labels: {Admin: true, Points: true}
+stats: network_lengths
+panel: [title, locator, legend, stats, scale, notes]
+panel_portrait: [[title, scale, notes], [legend, stats], [locator]]
+notes: [crs, imagery, source, measurements, north_date, disclaimer]
+contours: {default: false, interval: 10}
